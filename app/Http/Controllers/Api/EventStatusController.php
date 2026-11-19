@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\AuditLogger;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
 use Google\Cloud\Firestore\FieldValue;
@@ -24,7 +25,8 @@ class EventStatusController extends Controller
     public function update(
         Request $request,
         string $id,
-        FirestoreClient $firestore
+        FirestoreClient $firestore,
+        AuditLogger $auditLogger
     ): JsonResponse {
         $uid = $request->attributes->get('firebase_uid');
         $role = $request->attributes->get('firebase_role');
@@ -80,13 +82,15 @@ class EventStatusController extends Controller
                 ->collection('events')
                 ->document($id);
 
-            // Comprobar el estado más reciente en Firestore.
+            // Leer y modificar el evento dentro de la transacción.
             $result = $firestore->runTransaction(
                 function (Transaction $transaction) use (
+                    $firestore,
                     $document,
                     $uid,
                     $role,
-                    $newStatus
+                    $newStatus,
+                    $auditLogger
                 ): array {
                     $snapshot = $transaction->snapshot($document);
 
@@ -132,7 +136,7 @@ class EventStatusController extends Controller
                             true
                         );
 
-                    // Despublicar solo eventos publicados.
+                    // Despublicar únicamente eventos publicados.
                     $canUnpublish = $newStatus === 'unpublished'
                         && $currentStatus === 'published';
 
@@ -143,7 +147,7 @@ class EventStatusController extends Controller
                         ];
                     }
 
-                    // Comprobar fechas al publicar o republicar.
+                    // Comprobar las fechas al publicar o republicar.
                     if (
                         $newStatus === 'published' &&
                         !$this->hasValidDates($event)
@@ -151,12 +155,32 @@ class EventStatusController extends Controller
                         return [
                             'code' => 422,
                             'message' =>
-                                'El evento necesita fechas de inicio y '.
+                                'El evento necesita fechas de inicio y ' .
                                 'finalización válidas para publicarse.',
                         ];
                     }
 
-                    // Guardar únicamente el estado y la fecha del cambio.
+                    // Preparar los datos de auditoría.
+                    $auditData = $auditLogger->prepare(
+                        $newStatus,
+                        'events',
+                        $document->id(),
+                        $uid,
+                        $role,
+                        ['status']
+                    );
+
+                    if ($auditData === null) {
+                        throw new RuntimeException(
+                            'No fue posible preparar la auditoría.'
+                        );
+                    }
+
+                    $auditDocument = $firestore
+                        ->collection('audit_logs')
+                        ->newDocument();
+
+                    // Modificar el estado del evento.
                     $transaction->update($document, [
                         [
                             'path' => 'status',
@@ -167,6 +191,12 @@ class EventStatusController extends Controller
                             'value' => FieldValue::serverTimestamp(),
                         ],
                     ]);
+
+                    // Guardar la auditoría en la misma transacción.
+                    $transaction->create(
+                        $auditDocument,
+                        $auditData
+                    );
 
                     return [
                         'code' => 200,
@@ -189,11 +219,14 @@ class EventStatusController extends Controller
                 ),
                 $result['code']
             );
+
         } catch (AuthorizationException $e) {
             return response()->json([
                 'message' => 'No tienes permisos sobre este evento.',
             ], 403);
+
         } catch (Throwable $e) {
+            // Registrar únicamente información técnica necesaria.
             Log::error('Error al cambiar el estado del evento', [
                 'eventId' => $id,
                 'exception' => get_class($e),

@@ -3,15 +3,18 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\AuditLogger;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
 use Google\Cloud\Firestore\FieldValue;
 use Google\Cloud\Firestore\FirestoreClient;
+use Google\Cloud\Firestore\Transaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use RuntimeException;
 use Throwable;
 
 class EventController extends Controller
@@ -21,7 +24,8 @@ class EventController extends Controller
      */
     public function store(
         Request $request,
-        FirestoreClient $firestore
+        FirestoreClient $firestore,
+        AuditLogger $auditLogger
     ): JsonResponse {
         // Obtener la identidad del usuario.
         $uid = $request->attributes->get('firebase_uid');
@@ -105,11 +109,16 @@ class EventController extends Controller
         }
 
         try {
-            // Crear el documento de Firestore.
+            // Preparar las referencias antes de la transacción.
             $document = $firestore
                 ->collection('events')
                 ->newDocument();
 
+            $auditDocument = $firestore
+                ->collection('audit_logs')
+                ->newDocument();
+
+            // Preparar los datos del evento.
             $event = [
                 'sellerId' => $uid,
                 'name' => $data['name'],
@@ -129,12 +138,45 @@ class EventController extends Controller
                 'updatedAt' => FieldValue::serverTimestamp(),
             ];
 
-            $document->set($event);
+            $eventId = $document->id();
+
+            // Preparar la auditoría con el servicio centralizado.
+            $auditData = $auditLogger->prepare(
+                'created',
+                'events',
+                $eventId,
+                $uid,
+                $role,
+                array_keys($data)
+            );
+
+            if ($auditData === null) {
+                throw new RuntimeException(
+                    'No fue posible preparar la auditoría.'
+                );
+            }
+
+            // Guardar el evento y la auditoría en una transacción.
+            $firestore->runTransaction(
+                function (Transaction $transaction) use (
+                    $document,
+                    $auditDocument,
+                    $event,
+                    $auditData
+                ): void {
+                    $transaction->create($document, $event);
+
+                    $transaction->create(
+                        $auditDocument,
+                        $auditData
+                    );
+                }
+            );
 
             return response()->json([
                 'message' => 'Evento registrado como borrador.',
                 'event' => [
-                    'id' => $document->id(),
+                    'id' => $eventId,
                     'sellerId' => $uid,
                     'name' => $event['name'],
                     'description' => $event['description'],
@@ -164,7 +206,8 @@ class EventController extends Controller
     public function update(
         Request $request,
         string $id,
-        FirestoreClient $firestore
+        FirestoreClient $firestore,
+        AuditLogger $auditLogger
     ): JsonResponse {
         // Obtener la identidad del usuario.
         $uid = $request->attributes->get('firebase_uid');
@@ -259,106 +302,164 @@ class EventController extends Controller
         }
 
         try {
-            // Buscar el evento.
+            // Buscar el documento del evento.
             $document = $firestore
                 ->collection('events')
                 ->document($id);
 
-            $snapshot = $document->snapshot();
+            // Comprobar permisos y fechas con los datos actuales.
+            $result = $firestore->runTransaction(
+                function (Transaction $transaction) use (
+                    $firestore,
+                    $document,
+                    $id,
+                    $uid,
+                    $role,
+                    $data,
+                    $auditLogger
+                ): array {
+                    $snapshot = $transaction->snapshot($document);
 
-            if (!$snapshot->exists()) {
-                return response()->json([
-                    'message' => 'El evento no existe.',
-                ], 404);
-            }
+                    if (!$snapshot->exists()) {
+                        return [
+                            'code' => 404,
+                            'message' => 'El evento no existe.',
+                        ];
+                    }
 
-            $event = $snapshot->data();
+                    $event = $snapshot->data();
 
-            if (!is_array($event)) {
-                return response()->json([
-                    'message' => 'No fue posible obtener el evento.',
-                ], 500);
-            }
+                    if (!is_array($event)) {
+                        return [
+                            'code' => 500,
+                            'message' => 'No fue posible obtener el evento.',
+                        ];
+                    }
 
-            // Comprobar la propiedad del evento.
-            if (
-                $role === 'seller' &&
-                ($event['sellerId'] ?? null) !== $uid
-            ) {
-                return response()->json([
-                    'message' => 'No tienes permisos para editar este evento.',
-                ], 403);
-            }
+                    // Comprobar la propiedad del evento.
+                    if (
+                        $role === 'seller' &&
+                        ($event['sellerId'] ?? null) !== $uid
+                    ) {
+                        return [
+                            'code' => 403,
+                            'message' =>
+                                'No tienes permisos para editar este evento.',
+                        ];
+                    }
 
-            // Obtener las fechas nuevas o existentes.
-            $start = $data['date'] ?? ($event['date'] ?? null);
-            $end = $data['endAt'] ?? ($event['endAt'] ?? null);
+                    // Obtener las fechas nuevas o existentes.
+                    $start = $data['date'] ?? ($event['date'] ?? null);
+                    $end = $data['endAt'] ?? ($event['endAt'] ?? null);
 
-            if ($start instanceof Timestamp) {
-                $start = $start->get();
-            }
+                    if ($start instanceof Timestamp) {
+                        $start = $start->get();
+                    }
 
-            if ($end instanceof Timestamp) {
-                $end = $end->get();
-            }
+                    if ($end instanceof Timestamp) {
+                        $end = $end->get();
+                    }
 
-            if ($start instanceof DateTimeInterface) {
-                $start = $start->format(DateTimeInterface::ATOM);
-            }
+                    if ($start instanceof DateTimeInterface) {
+                        $start = $start->format(DateTimeInterface::ATOM);
+                    }
 
-            if ($end instanceof DateTimeInterface) {
-                $end = $end->format(DateTimeInterface::ATOM);
-            }
+                    if ($end instanceof DateTimeInterface) {
+                        $end = $end->format(DateTimeInterface::ATOM);
+                    }
 
-            // Evitar una finalización anterior al inicio.
-            if (
-                $start !== null &&
-                $end !== null &&
-                new DateTimeImmutable($end) <= new DateTimeImmutable($start)
-            ) {
-                return response()->json([
-                    'message' => 'Los datos del evento no son válidos.',
-                    'errors' => [
-                        'endAt' => [
-                            'La finalización debe ser posterior al inicio.',
-                        ],
-                    ],
-                ], 422);
-            }
+                    // Evitar una finalización anterior al inicio.
+                    if (
+                        $start !== null &&
+                        $end !== null &&
+                        new DateTimeImmutable($end)
+                            <= new DateTimeImmutable($start)
+                    ) {
+                        return [
+                            'code' => 422,
+                            'message' => 'Los datos del evento no son válidos.',
+                            'errors' => [
+                                'endAt' => [
+                                    'La finalización debe ser posterior al inicio.',
+                                ],
+                            ],
+                        ];
+                    }
 
-            // Preparar únicamente los campos modificados.
-            $updates = [];
+                    // Preparar únicamente los campos modificados.
+                    $updates = [];
 
-            foreach ($data as $field => $value) {
-                if (in_array($field, ['date', 'endAt'], true)) {
-                    $value = new Timestamp(new DateTimeImmutable($value));
+                    foreach ($data as $field => $value) {
+                        if (in_array($field, ['date', 'endAt'], true)) {
+                            $value = new Timestamp(
+                                new DateTimeImmutable($value)
+                            );
+                        }
+
+                        $updates[] = [
+                            'path' => $field,
+                            'value' => $value,
+                        ];
+                    }
+
+                    // Registrar la última modificación.
+                    $updates[] = [
+                        'path' => 'updatedAt',
+                        'value' => FieldValue::serverTimestamp(),
+                    ];
+
+                    // Preparar la auditoría con el servicio centralizado.
+                    $auditData = $auditLogger->prepare(
+                        'updated',
+                        'events',
+                        $id,
+                        $uid,
+                        $role,
+                        array_keys($data)
+                    );
+
+                    if ($auditData === null) {
+                        throw new RuntimeException(
+                            'No fue posible preparar la auditoría.'
+                        );
+                    }
+
+                    $auditDocument = $firestore
+                        ->collection('audit_logs')
+                        ->newDocument();
+
+                    // Actualizar el evento.
+                    $transaction->update($document, $updates);
+
+                    // Guardar la auditoría en la misma transacción.
+                    $transaction->create(
+                        $auditDocument,
+                        $auditData
+                    );
+
+                    return [
+                        'code' => 200,
+                        'message' => 'Evento actualizado correctamente.',
+                        'event' => array_merge(
+                            [
+                                'id' => $id,
+                                'sellerId' => $event['sellerId'] ?? null,
+                                'status' => $event['status'] ?? null,
+                            ],
+                            $data
+                        ),
+                    ];
                 }
+            );
 
-                $updates[] = [
-                    'path' => $field,
-                    'value' => $value,
-                ];
-            }
+            $statusCode = $result['code'] ?? 500;
 
-            // Registrar la última modificación.
-            $updates[] = [
-                'path' => 'updatedAt',
-                'value' => FieldValue::serverTimestamp(),
-            ];
+            unset($result['code']);
 
-            $document->update($updates);
-
-            return response()->json([
-                'message' => 'Evento actualizado correctamente.',
-                'event' => array_merge(
-                    [
-                        'id' => $id,
-                        'sellerId' => $event['sellerId'] ?? null,
-                        'status' => $event['status'] ?? null,
-                    ],
-                    $data
-                ),
-            ], 200);
+            return response()->json(
+                $result,
+                $statusCode
+            );
 
         } catch (Throwable $e) {
             Log::error('Error al actualizar evento BluePass', [

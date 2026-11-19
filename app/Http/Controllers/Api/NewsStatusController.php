@@ -3,12 +3,15 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\AuditLogger;
 use Google\Cloud\Firestore\FieldValue;
 use Google\Cloud\Firestore\FirestoreClient;
+use Google\Cloud\Firestore\Transaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use RuntimeException;
 use Throwable;
 
 class NewsStatusController extends Controller
@@ -19,17 +22,20 @@ class NewsStatusController extends Controller
     public function update(
         Request $request,
         string $id,
-        FirestoreClient $firestore
+        FirestoreClient $firestore,
+        AuditLogger $auditLogger
     ): JsonResponse {
         $uid = $request->attributes->get('firebase_uid');
         $role = $request->attributes->get('firebase_role');
 
+        // Verificar la identidad del usuario.
         if (!is_string($uid) || $uid === '') {
             return response()->json([
                 'message' => 'No fue posible verificar la identidad.',
             ], 401);
         }
 
+        // Permitir únicamente vendedores y administradores.
         if (!in_array($role, ['seller', 'admin'], true)) {
             return response()->json([
                 'message' => 'No tienes permisos para gestionar noticias.',
@@ -54,6 +60,7 @@ class NewsStatusController extends Controller
             ], 422);
         }
 
+        // Validar el nuevo estado solicitado.
         $validator = Validator::make($request->all(), [
             'status' => [
                 'required',
@@ -72,19 +79,21 @@ class NewsStatusController extends Controller
         $requestedStatus = $validator->validated()['status'];
 
         try {
-            // Usar una transacción para evitar cambios simultáneos.
+            // Obtener la referencia de la noticia.
+            $document = $firestore
+                ->collection('news')
+                ->document($id);
+
+            // Consultar y modificar los datos en una transacción.
             $result = $firestore->runTransaction(
-                function ($transaction) use (
+                function (Transaction $transaction) use (
                     $firestore,
-                    $id,
+                    $document,
                     $uid,
                     $role,
-                    $requestedStatus
-                ) {
-                    $document = $firestore
-                        ->collection('news')
-                        ->document($id);
-
+                    $requestedStatus,
+                    $auditLogger
+                ): array {
                     $snapshot = $transaction->snapshot($document);
 
                     if (!$snapshot->exists()) {
@@ -103,7 +112,7 @@ class NewsStatusController extends Controller
                         ];
                     }
 
-                    // El vendedor solo administra noticias propias.
+                    // El vendedor solo administra sus propias noticias.
                     if (
                         $role === 'seller' &&
                         ($news['authorId'] ?? null) !== $uid
@@ -116,6 +125,7 @@ class NewsStatusController extends Controller
 
                     $currentStatus = $news['status'] ?? null;
 
+                    // Evitar cambios innecesarios.
                     if ($currentStatus === $requestedStatus) {
                         return [
                             'code' => 409,
@@ -123,6 +133,7 @@ class NewsStatusController extends Controller
                         ];
                     }
 
+                    // Definir los cambios de estado permitidos.
                     $allowedTransitions = [
                         'draft' => ['published'],
                         'published' => ['unpublished'],
@@ -143,17 +154,40 @@ class NewsStatusController extends Controller
                         ];
                     }
 
-                    // Exigir contenido mínimo antes de publicar.
+                    // Verificar el contenido antes de publicar.
                     if (
                         $requestedStatus === 'published' &&
                         !$this->hasValidContent($news)
                     ) {
                         return [
                             'code' => 422,
-                            'message' => 'La noticia debe tener título y contenido válidos para publicarse.',
+                            'message' =>
+                                'La noticia debe tener título y contenido ' .
+                                'válidos para publicarse.',
                         ];
                     }
 
+                    // Preparar la auditoría con el servicio centralizado.
+                    $auditData = $auditLogger->prepare(
+                        $requestedStatus,
+                        'news',
+                        $document->id(),
+                        $uid,
+                        $role,
+                        ['status']
+                    );
+
+                    if ($auditData === null) {
+                        throw new RuntimeException(
+                            'No fue posible preparar la auditoría.'
+                        );
+                    }
+
+                    $auditDocument = $firestore
+                        ->collection('audit_logs')
+                        ->newDocument();
+
+                    // Actualizar el estado de la noticia.
                     $transaction->update($document, [
                         [
                             'path' => 'status',
@@ -164,6 +198,12 @@ class NewsStatusController extends Controller
                             'value' => FieldValue::serverTimestamp(),
                         ],
                     ]);
+
+                    // Registrar la acción dentro de la misma transacción.
+                    $transaction->create(
+                        $auditDocument,
+                        $auditData
+                    );
 
                     return [
                         'code' => 200,
@@ -193,6 +233,7 @@ class NewsStatusController extends Controller
             );
 
         } catch (Throwable $e) {
+            // Guardar información técnica sin exponer credenciales.
             Log::error('Error al cambiar estado de noticia BluePass', [
                 'exception' => get_class($e),
             ]);

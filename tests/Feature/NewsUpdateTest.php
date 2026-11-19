@@ -6,6 +6,7 @@ use Google\Cloud\Firestore\CollectionReference;
 use Google\Cloud\Firestore\DocumentReference;
 use Google\Cloud\Firestore\DocumentSnapshot;
 use Google\Cloud\Firestore\FirestoreClient;
+use Google\Cloud\Firestore\Transaction;
 use Kreait\Firebase\Auth\UserRecord;
 use Kreait\Firebase\Contract\Auth;
 use Lcobucci\JWT\Token\DataSet;
@@ -25,6 +26,7 @@ class NewsUpdateTest extends TestCase
 
         $firestore = Mockery::mock(FirestoreClient::class);
         $firestore->shouldNotReceive('collection');
+        $firestore->shouldNotReceive('runTransaction');
 
         $this->app->instance(Auth::class, $auth);
         $this->app->instance(FirestoreClient::class, $firestore);
@@ -307,23 +309,37 @@ class NewsUpdateTest extends TestCase
             ->andReturn($users);
 
         if ($action === 'update-error') {
+            // Simular un error antes de iniciar la transacción.
             $firestore->shouldReceive('collection')
                 ->once()
                 ->with('news')
                 ->andThrow(new \RuntimeException(
                     'Error simulado de Firestore.'
                 ));
+
+            $firestore->shouldNotReceive('runTransaction');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
+
         } elseif (str_starts_with($action, 'update-')) {
             $this->mockNewsUpdate(
                 $firestore,
                 $uid,
+                $role,
                 $action
             );
+
         } else {
-            // No consultar noticias si no hay autorización
-            // o si la solicitud contiene datos inválidos.
+            // No consultar noticias ni crear auditorías
+            // cuando la solicitud se rechaza.
             $firestore->shouldNotReceive('collection')
                 ->with('news');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
+
+            $firestore->shouldNotReceive('runTransaction');
         }
 
         $this->app->instance(
@@ -338,6 +354,7 @@ class NewsUpdateTest extends TestCase
     private function mockNewsUpdate(
         $firestore,
         string $uid,
+        string $role,
         string $action
     ): void {
         $missing = $action === 'update-missing';
@@ -352,6 +369,7 @@ class NewsUpdateTest extends TestCase
             ? 'otro-vendedor'
             : $uid;
 
+        // Preparar la respuesta de Firestore.
         $snapshot = Mockery::mock(
             DocumentSnapshot::class
         );
@@ -378,68 +396,9 @@ class NewsUpdateTest extends TestCase
             DocumentReference::class
         );
 
-        $document->shouldReceive('snapshot')
-            ->once()
-            ->andReturn($snapshot);
-
-        $canUpdate = in_array(
-            $action,
-            ['update-own', 'update-admin', 'update-summary'],
-            true
-        );
-
-        if ($canUpdate) {
-            // Verificar que solo se modifiquen campos permitidos.
-            $document->shouldReceive('update')
-                ->once()
-                ->with(Mockery::on(
-                    function ($updates) use ($action) {
-                        if (
-                            !is_array($updates) ||
-                            count($updates) !== 2
-                        ) {
-                            return false;
-                        }
-
-                        $fields = [];
-
-                        foreach ($updates as $update) {
-                            if (
-                                !is_array($update) ||
-                                !isset($update['path']) ||
-                                !array_key_exists('value', $update)
-                            ) {
-                                return false;
-                            }
-
-                            $fields[$update['path']] = $update['value'];
-                        }
-
-                        if (!isset($fields['updatedAt'])) {
-                            return false;
-                        }
-
-                        if (
-                            array_key_exists('authorId', $fields) ||
-                            array_key_exists('status', $fields) ||
-                            array_key_exists('createdAt', $fields)
-                        ) {
-                            return false;
-                        }
-
-                        if ($action === 'update-summary') {
-                            return array_key_exists('summary', $fields)
-                                && $fields['summary'] === null;
-                        }
-
-                        return ($fields['title'] ?? null)
-                            === 'Noticia actualizada';
-                    }
-                ));
-        } else {
-            // No modificar noticias ajenas o inexistentes.
-            $document->shouldNotReceive('update');
-        }
+        // La lectura se hace mediante la transacción.
+        $document->shouldNotReceive('snapshot');
+        $document->shouldNotReceive('update');
 
         $news = Mockery::mock(
             CollectionReference::class
@@ -454,5 +413,139 @@ class NewsUpdateTest extends TestCase
             ->once()
             ->with('news')
             ->andReturn($news);
+
+        $transaction = Mockery::mock(
+            Transaction::class
+        );
+
+        $transaction->shouldReceive('snapshot')
+            ->once()
+            ->with($document)
+            ->andReturn($snapshot);
+
+        $canUpdate = in_array(
+            $action,
+            ['update-own', 'update-admin', 'update-summary'],
+            true
+        );
+
+        if ($canUpdate) {
+            // Preparar el documento del historial.
+            $auditDocument = Mockery::mock(
+                DocumentReference::class
+            );
+
+            $auditCollection = Mockery::mock(
+                CollectionReference::class
+            );
+
+            $auditCollection->shouldReceive('newDocument')
+                ->once()
+                ->andReturn($auditDocument);
+
+            $firestore->shouldReceive('collection')
+                ->once()
+                ->with('audit_logs')
+                ->andReturn($auditCollection);
+
+            // Verificar los campos modificados.
+            $transaction->shouldReceive('update')
+                ->once()
+                ->with(
+                    $document,
+                    Mockery::on(
+                        function ($updates) use ($action) {
+                            if (
+                                !is_array($updates) ||
+                                count($updates) !== 2
+                            ) {
+                                return false;
+                            }
+
+                            $fields = [];
+
+                            foreach ($updates as $update) {
+                                if (
+                                    !is_array($update) ||
+                                    !isset($update['path']) ||
+                                    !array_key_exists('value', $update)
+                                ) {
+                                    return false;
+                                }
+
+                                $fields[$update['path']] = $update['value'];
+                            }
+
+                            if (!isset($fields['updatedAt'])) {
+                                return false;
+                            }
+
+                            if (
+                                array_key_exists('authorId', $fields) ||
+                                array_key_exists('status', $fields) ||
+                                array_key_exists('createdAt', $fields)
+                            ) {
+                                return false;
+                            }
+
+                            if ($action === 'update-summary') {
+                                return array_key_exists('summary', $fields)
+                                    && $fields['summary'] === null;
+                            }
+
+                            return ($fields['title'] ?? null)
+                                === 'Noticia actualizada';
+                        }
+                    )
+                );
+
+            $changedField = $action === 'update-summary'
+                ? 'summary'
+                : 'title';
+
+            // Verificar que se registre la auditoría.
+            $transaction->shouldReceive('create')
+                ->once()
+                ->with(
+                    $auditDocument,
+                    Mockery::on(
+                        function ($data) use (
+                            $uid,
+                            $role,
+                            $changedField
+                        ) {
+                            return is_array($data)
+                                && count($data) === 7
+                                && ($data['action'] ?? null) === 'updated'
+                                && ($data['resourceType'] ?? null) === 'news'
+                                && ($data['resourceId'] ?? null)
+                                    === 'noticia-prueba'
+                                && ($data['actorId'] ?? null) === $uid
+                                && ($data['actorRole'] ?? null) === $role
+                                && ($data['changedFields'] ?? null)
+                                    === [$changedField]
+                                && isset($data['createdAt']);
+                        }
+                    )
+                );
+
+        } else {
+            // Las solicitudes rechazadas no generan cambios.
+            $transaction->shouldNotReceive('update');
+            $transaction->shouldNotReceive('create');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
+        }
+
+        // Ejecutar la transacción simulada.
+        $firestore->shouldReceive('runTransaction')
+            ->once()
+            ->with(Mockery::type('callable'))
+            ->andReturnUsing(
+                function ($callback) use ($transaction) {
+                    return $callback($transaction);
+                }
+            );
     }
 }

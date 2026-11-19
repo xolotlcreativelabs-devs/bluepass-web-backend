@@ -8,6 +8,7 @@ use Google\Cloud\Firestore\CollectionReference;
 use Google\Cloud\Firestore\DocumentReference;
 use Google\Cloud\Firestore\DocumentSnapshot;
 use Google\Cloud\Firestore\FirestoreClient;
+use Google\Cloud\Firestore\Transaction;
 use Kreait\Firebase\Auth\UserRecord;
 use Kreait\Firebase\Contract\Auth;
 use Lcobucci\JWT\Token\DataSet;
@@ -399,6 +400,7 @@ class EventControllerTest extends TestCase
 
         $firestore = Mockery::mock(FirestoreClient::class);
         $firestore->shouldNotReceive('collection');
+        $firestore->shouldNotReceive('runTransaction');
 
         $this->app->instance(Auth::class, $auth);
         $this->app->instance(FirestoreClient::class, $firestore);
@@ -485,57 +487,52 @@ class EventControllerTest extends TestCase
             $this->mockEventCreation(
                 $firestore,
                 $uid,
+                $role,
                 $action === 'create-dates'
             );
         } elseif (str_starts_with($action, 'update-')) {
-            $this->mockEventUpdate($firestore, $uid, $action);
+            $this->mockEventUpdate(
+                $firestore,
+                $uid,
+                $role,
+                $action
+            );
         } else {
+            // Las solicitudes rechazadas no consultan eventos
+            // ni generan registros de auditoría.
             $firestore->shouldNotReceive('collection')
                 ->with('events');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
+
+            $firestore->shouldNotReceive('runTransaction');
         }
 
-        $this->app->instance(FirestoreClient::class, $firestore);
+        $this->app->instance(
+            FirestoreClient::class,
+            $firestore
+        );
     }
 
     /**
-     * Simular el registro en Firestore.
+     * Simular la creación del evento y su auditoría.
      */
     private function mockEventCreation(
         $firestore,
         string $uid,
+        string $role,
         bool $withDates
     ): void {
         $document = Mockery::mock(DocumentReference::class);
 
-        $document->shouldReceive('set')
-            ->once()
-            ->with(Mockery::on(function ($data) use ($uid, $withDates) {
-                if (
-                    !is_array($data) ||
-                    ($data['sellerId'] ?? null) !== $uid ||
-                    ($data['status'] ?? null) !== 'draft' ||
-                    ($data['name'] ?? null) !== 'Concierto de prueba' ||
-                    ($data['category'] ?? null) !== 'Música' ||
-                    !isset($data['createdAt']) ||
-                    !isset($data['updatedAt'])
-                ) {
-                    return false;
-                }
-
-                if ($withDates) {
-                    return ($data['date'] ?? null) instanceof Timestamp
-                        && ($data['endAt'] ?? null) instanceof Timestamp
-                        && $data['endAt']->get() > $data['date']->get();
-                }
-
-                return ($data['date'] ?? null) === null
-                    && ($data['endAt'] ?? null) === null;
-            }))
-            ->andReturn([]);
-
         $document->shouldReceive('id')
             ->once()
             ->andReturn('evento-prueba');
+
+        // El controlador ya no utiliza escrituras directas.
+        $document->shouldNotReceive('set');
+        $document->shouldNotReceive('update');
 
         $events = Mockery::mock(CollectionReference::class);
 
@@ -547,14 +544,106 @@ class EventControllerTest extends TestCase
             ->once()
             ->with('events')
             ->andReturn($events);
+
+        // Preparar el documento del historial.
+        $auditDocument = Mockery::mock(DocumentReference::class);
+
+        $auditCollection = Mockery::mock(
+            CollectionReference::class
+        );
+
+        $auditCollection->shouldReceive('newDocument')
+            ->once()
+            ->andReturn($auditDocument);
+
+        $firestore->shouldReceive('collection')
+            ->once()
+            ->with('audit_logs')
+            ->andReturn($auditCollection);
+
+        $transaction = Mockery::mock(Transaction::class);
+
+        // Verificar los datos guardados del evento.
+        $transaction->shouldReceive('create')
+            ->once()
+            ->with(
+                $document,
+                Mockery::on(
+                    function ($data) use ($uid, $withDates) {
+                        if (
+                            !is_array($data) ||
+                            ($data['sellerId'] ?? null) !== $uid ||
+                            ($data['status'] ?? null) !== 'draft' ||
+                            ($data['name'] ?? null) !== 'Concierto de prueba' ||
+                            ($data['category'] ?? null) !== 'Música' ||
+                            !isset($data['createdAt']) ||
+                            !isset($data['updatedAt'])
+                        ) {
+                            return false;
+                        }
+
+                        if ($withDates) {
+                            return ($data['date'] ?? null) instanceof Timestamp
+                                && ($data['endAt'] ?? null) instanceof Timestamp
+                                && $data['endAt']->get() > $data['date']->get();
+                        }
+
+                        return ($data['date'] ?? null) === null
+                            && ($data['endAt'] ?? null) === null;
+                    }
+                )
+            );
+
+        // Verificar la auditoría de creación.
+        $expectedFields = array_keys($this->eventData());
+
+        if ($withDates) {
+            $expectedFields[] = 'date';
+            $expectedFields[] = 'endAt';
+        }
+
+        $transaction->shouldReceive('create')
+            ->once()
+            ->with(
+                $auditDocument,
+                Mockery::on(
+                    function ($data) use (
+                        $uid,
+                        $role,
+                        $expectedFields
+                    ) {
+                        return is_array($data)
+                            && count($data) === 7
+                            && ($data['action'] ?? null) === 'created'
+                            && ($data['resourceType'] ?? null) === 'events'
+                            && ($data['resourceId'] ?? null) === 'evento-prueba'
+                            && ($data['actorId'] ?? null) === $uid
+                            && ($data['actorRole'] ?? null) === $role
+                            && ($data['changedFields'] ?? null) === $expectedFields
+                            && isset($data['createdAt']);
+                    }
+                )
+            );
+
+        $transaction->shouldNotReceive('update');
+
+        $firestore->shouldReceive('runTransaction')
+            ->once()
+            ->with(Mockery::type('callable'))
+            ->andReturnUsing(
+                function ($callback) use ($transaction) {
+                    return $callback($transaction);
+                }
+            );
     }
 
     /**
-     * Simular la consulta y actualización de eventos.
+     * Simular la edición del evento y su auditoría.
      */
     private function mockEventUpdate(
         $firestore,
         string $uid,
+        string $role,
         string $action
     ): void {
         $missing = $action === 'update-missing';
@@ -610,45 +699,9 @@ class EventControllerTest extends TestCase
 
         $document = Mockery::mock(DocumentReference::class);
 
-        $document->shouldReceive('snapshot')
-            ->once()
-            ->andReturn($snapshot);
-
-        if (in_array(
-            $action,
-            ['update-own', 'update-admin', 'update-valid-date'],
-            true
-        )) {
-            $document->shouldReceive('update')
-                ->once()
-                ->with(Mockery::on(function ($updates) use ($action) {
-                    if (!is_array($updates) || count($updates) !== 2) {
-                        return false;
-                    }
-
-                    if (
-                        $updates[1]['path'] !== 'updatedAt' ||
-                        !isset($updates[1]['value'])
-                    ) {
-                        return false;
-                    }
-
-                    if ($action === 'update-valid-date') {
-                        return $updates[0]['path'] === 'date'
-                            && $updates[0]['value'] instanceof Timestamp
-                            && $updates[0]['value']->get() ==
-                                new DateTimeImmutable(
-                                    '2027-05-20T19:00:00-06:00'
-                                );
-                    }
-
-                    return $updates[0]['path'] === 'name'
-                        && $updates[0]['value'] === 'Evento actualizado';
-                }))
-                ->andReturn([]);
-        } else {
-            $document->shouldNotReceive('update');
-        }
+        // La lectura y escritura se hacen en la transacción.
+        $document->shouldNotReceive('snapshot');
+        $document->shouldNotReceive('update');
 
         $events = Mockery::mock(CollectionReference::class);
 
@@ -665,5 +718,119 @@ class EventControllerTest extends TestCase
             ->once()
             ->with('events')
             ->andReturn($events);
+
+        $transaction = Mockery::mock(Transaction::class);
+
+        $transaction->shouldReceive('snapshot')
+            ->once()
+            ->with($document)
+            ->andReturn($snapshot);
+
+        $canUpdate = in_array(
+            $action,
+            ['update-own', 'update-admin', 'update-valid-date'],
+            true
+        );
+
+        if ($canUpdate) {
+            $auditDocument = Mockery::mock(
+                DocumentReference::class
+            );
+
+            $auditCollection = Mockery::mock(
+                CollectionReference::class
+            );
+
+            $auditCollection->shouldReceive('newDocument')
+                ->once()
+                ->andReturn($auditDocument);
+
+            $firestore->shouldReceive('collection')
+                ->once()
+                ->with('audit_logs')
+                ->andReturn($auditCollection);
+
+            // Comprobar que se actualice el campo permitido.
+            $transaction->shouldReceive('update')
+                ->once()
+                ->with(
+                    $document,
+                    Mockery::on(
+                        function ($updates) use ($action) {
+                            if (
+                                !is_array($updates) ||
+                                count($updates) !== 2
+                            ) {
+                                return false;
+                            }
+
+                            if (
+                                ($updates[1]['path'] ?? null) !== 'updatedAt' ||
+                                !isset($updates[1]['value'])
+                            ) {
+                                return false;
+                            }
+
+                            if ($action === 'update-valid-date') {
+                                return ($updates[0]['path'] ?? null) === 'date'
+                                    && ($updates[0]['value'] ?? null) instanceof Timestamp
+                                    && $updates[0]['value']->get() ==
+                                        new DateTimeImmutable(
+                                            '2027-05-20T19:00:00-06:00'
+                                        );
+                            }
+
+                            return ($updates[0]['path'] ?? null) === 'name'
+                                && ($updates[0]['value'] ?? null)
+                                    === 'Evento actualizado';
+                        }
+                    )
+                );
+
+            $changedField = $action === 'update-valid-date'
+                ? 'date'
+                : 'name';
+
+            // Verificar la auditoría de edición.
+            $transaction->shouldReceive('create')
+                ->once()
+                ->with(
+                    $auditDocument,
+                    Mockery::on(
+                        function ($data) use (
+                            $uid,
+                            $role,
+                            $changedField
+                        ) {
+                            return is_array($data)
+                                && count($data) === 7
+                                && ($data['action'] ?? null) === 'updated'
+                                && ($data['resourceType'] ?? null) === 'events'
+                                && ($data['resourceId'] ?? null) === 'evento-prueba'
+                                && ($data['actorId'] ?? null) === $uid
+                                && ($data['actorRole'] ?? null) === $role
+                                && ($data['changedFields'] ?? null)
+                                    === [$changedField]
+                                && isset($data['createdAt']);
+                        }
+                    )
+                );
+        } else {
+            // Si no hay permisos o datos válidos, no guardar.
+            $transaction->shouldNotReceive('update');
+            $transaction->shouldNotReceive('create');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
+        }
+
+        $firestore->shouldReceive('runTransaction')
+            ->once()
+            ->with(Mockery::type('callable'))
+            ->andReturnUsing(
+                function ($callback) use ($transaction) {
+                    return $callback($transaction);
+                }
+            );
     }
 }

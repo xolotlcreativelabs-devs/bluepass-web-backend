@@ -256,7 +256,6 @@ class EventStatusControllerTest extends TestCase
             ),
         ];
 
-        // Simular un evento que no tiene fechas.
         if (!$withDates) {
             $event['date'] = null;
             $event['endAt'] = null;
@@ -278,13 +277,14 @@ class EventStatusControllerTest extends TestCase
             DocumentReference::class
         );
 
+        // El ID se utiliza en auditoría y en la respuesta.
         if ($newStatus !== null) {
             $document->shouldReceive('id')
-                ->once()
+                ->twice()
                 ->andReturn('evento-prueba');
         }
 
-        // Las modificaciones deben realizarse en la transacción.
+        // Las escrituras deben realizarse dentro de la transacción.
         $document->shouldNotReceive('update');
 
         $events = Mockery::mock(
@@ -311,6 +311,25 @@ class EventStatusControllerTest extends TestCase
             ->andReturn($snapshot);
 
         if ($newStatus !== null) {
+            // Preparar el documento del historial.
+            $auditDocument = Mockery::mock(
+                DocumentReference::class
+            );
+
+            $auditCollection = Mockery::mock(
+                CollectionReference::class
+            );
+
+            $auditCollection->shouldReceive('newDocument')
+                ->once()
+                ->andReturn($auditDocument);
+
+            $firestore->shouldReceive('collection')
+                ->once()
+                ->with('audit_logs')
+                ->andReturn($auditCollection);
+
+            // Comprobar el estado y la fecha de modificación.
             $transaction->shouldReceive('update')
                 ->once()
                 ->with(
@@ -335,14 +354,42 @@ class EventStatusControllerTest extends TestCase
                                 $fields[$update['path']] = $update['value'];
                             }
 
-                            return ($fields['status'] ?? null) === $newStatus
+                            return count($fields) === 2
+                                && ($fields['status'] ?? null) === $newStatus
                                 && isset($fields['updatedAt']);
                         }
                     )
                 );
+
+            // Verificar que la auditoría se guarde en la transacción.
+            $transaction->shouldReceive('create')
+                ->once()
+                ->with(
+                    $auditDocument,
+                    Mockery::on(
+                        function ($data) use ($newStatus) {
+                            if (!is_array($data)) {
+                                return false;
+                            }
+
+                            return count($data) === 7
+                                && ($data['action'] ?? null) === $newStatus
+                                && ($data['resourceType'] ?? null) === 'events'
+                                && ($data['resourceId'] ?? null) === 'evento-prueba'
+                                && ($data['actorId'] ?? null) === 'firebase-uid-prueba'
+                                && ($data['actorRole'] ?? null) === 'seller'
+                                && ($data['changedFields'] ?? null) === ['status']
+                                && isset($data['createdAt']);
+                        }
+                    )
+                );
         } else {
-            // No debe haber cambios para estados rechazados.
+            // No registrar cambios ni auditoría cuando se rechaza.
             $transaction->shouldNotReceive('update');
+            $transaction->shouldNotReceive('create');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
         }
 
         $firestore->shouldReceive('runTransaction')

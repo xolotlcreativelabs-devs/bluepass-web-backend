@@ -148,7 +148,7 @@ class NewsStatusValidationTest extends TestCase
     }
 
     /**
-     * Manejar los errores de Firestore sin mostrar detalles internos.
+     * Manejar errores de Firestore sin mostrar detalles internos.
      */
     public function test_news_status_handles_firestore_failure(): void
     {
@@ -158,12 +158,37 @@ class NewsStatusValidationTest extends TestCase
             FirestoreClient::class
         );
 
+        // El controlador obtiene la referencia antes
+        // de iniciar la transacción.
+        $document = Mockery::mock(
+            DocumentReference::class
+        );
+
+        $news = Mockery::mock(
+            CollectionReference::class
+        );
+
+        $news->shouldReceive('document')
+            ->once()
+            ->with('noticia-prueba')
+            ->andReturn($document);
+
+        $firestore->shouldReceive('collection')
+            ->once()
+            ->with('news')
+            ->andReturn($news);
+
+        // Simular que Firestore falla al ejecutar la transacción.
         $firestore->shouldReceive('runTransaction')
             ->once()
             ->with(Mockery::type('callable'))
             ->andThrow(new \RuntimeException(
                 'Error simulado de Firestore.'
             ));
+
+        // No debe intentarse registrar una auditoría.
+        $firestore->shouldNotReceive('collection')
+            ->with('audit_logs');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -265,7 +290,7 @@ class NewsStatusValidationTest extends TestCase
     }
 
     /**
-     * Simular la noticia y una transacción sin modificaciones.
+     * Simular una noticia y una transacción sin modificaciones.
      */
     private function mockNews(?array $newsData): void
     {
@@ -318,8 +343,12 @@ class NewsStatusValidationTest extends TestCase
             ->with($document)
             ->andReturn($snapshot);
 
-        // Las solicitudes rechazadas no deben modificar datos.
+        // Las solicitudes rechazadas no modifican datos.
         $transaction->shouldNotReceive('update');
+        $transaction->shouldNotReceive('create');
+
+        $firestore->shouldNotReceive('collection')
+            ->with('audit_logs');
 
         $firestore->shouldReceive('runTransaction')
             ->once()

@@ -240,9 +240,12 @@ class EventStatusPermissionsTest extends TestCase
             ->andReturn($users);
 
         if ($role === 'customer') {
-            // Los compradores no deben consultar el evento.
+            // Los compradores no deben acceder al evento.
             $firestore->shouldNotReceive('collection')
                 ->with('events');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
 
             $firestore->shouldNotReceive('runTransaction');
 
@@ -289,8 +292,9 @@ class EventStatusPermissionsTest extends TestCase
         $eventDocument->shouldNotReceive('update');
 
         if ($canUpdate) {
+            // El ID se utiliza en la auditoría y en la respuesta.
             $eventDocument->shouldReceive('id')
-                ->once()
+                ->twice()
                 ->andReturn('evento-prueba');
         }
 
@@ -319,7 +323,25 @@ class EventStatusPermissionsTest extends TestCase
             ->andReturn($eventSnapshot);
 
         if ($canUpdate) {
-            // Verificar el estado guardado por el administrador.
+            // Preparar el documento del historial.
+            $auditDocument = Mockery::mock(
+                DocumentReference::class
+            );
+
+            $auditCollection = Mockery::mock(
+                CollectionReference::class
+            );
+
+            $auditCollection->shouldReceive('newDocument')
+                ->once()
+                ->andReturn($auditDocument);
+
+            $firestore->shouldReceive('collection')
+                ->once()
+                ->with('audit_logs')
+                ->andReturn($auditCollection);
+
+            // Verificar la actualización del estado.
             $transaction->shouldReceive('update')
                 ->once()
                 ->with(
@@ -344,15 +366,48 @@ class EventStatusPermissionsTest extends TestCase
                                 $fields[$update['path']] = $update['value'];
                             }
 
-                            return ($fields['status'] ?? null)
-                                === $requestedStatus
+                            return count($fields) === 2
+                                && ($fields['status'] ?? null)
+                                    === $requestedStatus
                                 && isset($fields['updatedAt']);
                         }
                     )
                 );
+
+            // Comprobar que el administrador sea el autor de la acción.
+            $transaction->shouldReceive('create')
+                ->once()
+                ->with(
+                    $auditDocument,
+                    Mockery::on(
+                        function ($data) use ($requestedStatus, $uid) {
+                            if (!is_array($data)) {
+                                return false;
+                            }
+
+                            return count($data) === 7
+                                && ($data['action'] ?? null)
+                                    === $requestedStatus
+                                && ($data['resourceType'] ?? null)
+                                    === 'events'
+                                && ($data['resourceId'] ?? null)
+                                    === 'evento-prueba'
+                                && ($data['actorId'] ?? null) === $uid
+                                && ($data['actorRole'] ?? null)
+                                    === 'admin'
+                                && ($data['changedFields'] ?? null)
+                                    === ['status']
+                                && isset($data['createdAt']);
+                        }
+                    )
+                );
         } else {
-            // Un vendedor no debe modificar eventos ajenos.
+            // Un vendedor no puede modificar ni auditar eventos ajenos.
             $transaction->shouldNotReceive('update');
+            $transaction->shouldNotReceive('create');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
         }
 
         $firestore->shouldReceive('runTransaction')

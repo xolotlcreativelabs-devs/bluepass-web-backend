@@ -136,7 +136,7 @@ class NewsStatusControllerTest extends TestCase
     public function test_admin_can_publish_another_sellers_news(): void
     {
         $this->mockUser('admin');
-        $this->mockNews('draft', 'published', 'otro-vendedor');
+        $this->mockNews('draft', 'published', 'otro-vendedor', 'admin');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -163,6 +163,9 @@ class NewsStatusControllerTest extends TestCase
 
         $firestore->shouldNotReceive('collection')
             ->with('news');
+
+        $firestore->shouldNotReceive('collection')
+            ->with('audit_logs');
 
         $firestore->shouldNotReceive('runTransaction');
 
@@ -285,12 +288,13 @@ class NewsStatusControllerTest extends TestCase
     }
 
     /**
-     * Simular la noticia y su cambio de estado en Firestore.
+     * Simular una noticia y su cambio de estado en Firestore.
      */
     private function mockNews(
         string $currentStatus,
         ?string $newStatus,
-        string $authorId = 'firebase-uid-prueba'
+        string $authorId = 'firebase-uid-prueba',
+        string $actorRole = 'seller'
     ): void {
         $firestore = $this->app->make(
             FirestoreClient::class
@@ -321,8 +325,9 @@ class NewsStatusControllerTest extends TestCase
         $document->shouldNotReceive('update');
 
         if ($newStatus !== null) {
+            // El ID se consulta para la auditoría y la respuesta.
             $document->shouldReceive('id')
-                ->once()
+                ->twice()
                 ->andReturn('noticia-prueba');
         }
 
@@ -350,7 +355,25 @@ class NewsStatusControllerTest extends TestCase
             ->andReturn($snapshot);
 
         if ($newStatus !== null) {
-            // Verificar el cambio de estado dentro de la transacción.
+            // Simular el documento del historial.
+            $auditDocument = Mockery::mock(
+                DocumentReference::class
+            );
+
+            $auditCollection = Mockery::mock(
+                CollectionReference::class
+            );
+
+            $auditCollection->shouldReceive('newDocument')
+                ->once()
+                ->andReturn($auditDocument);
+
+            $firestore->shouldReceive('collection')
+                ->once()
+                ->with('audit_logs')
+                ->andReturn($auditCollection);
+
+            // Verificar que se actualice únicamente el estado.
             $transaction->shouldReceive('update')
                 ->once()
                 ->with(
@@ -375,16 +398,42 @@ class NewsStatusControllerTest extends TestCase
                                 $fields[$update['path']] = $update['value'];
                             }
 
-                            return ($fields['status'] ?? null)
-                                === $newStatus
-                                && isset($fields['updatedAt'])
-                                && count($fields) === 2;
+                            return count($fields) === 2
+                                && ($fields['status'] ?? null) === $newStatus
+                                && isset($fields['updatedAt']);
+                        }
+                    )
+                );
+
+            // Verificar la creación del historial en la transacción.
+            $transaction->shouldReceive('create')
+                ->once()
+                ->with(
+                    $auditDocument,
+                    Mockery::on(
+                        function ($data) use ($newStatus, $actorRole) {
+                            if (!is_array($data)) {
+                                return false;
+                            }
+
+                            return count($data) === 7
+                                && ($data['action'] ?? null) === $newStatus
+                                && ($data['resourceType'] ?? null) === 'news'
+                                && ($data['resourceId'] ?? null) === 'noticia-prueba'
+                                && ($data['actorId'] ?? null) === 'firebase-uid-prueba'
+                                && ($data['actorRole'] ?? null) === $actorRole
+                                && ($data['changedFields'] ?? null) === ['status']
+                                && isset($data['createdAt']);
                         }
                     )
                 );
         } else {
-            // No modificar noticias cuando se rechaza la solicitud.
+            // Las solicitudes rechazadas no modifican datos.
             $transaction->shouldNotReceive('update');
+            $transaction->shouldNotReceive('create');
+
+            $firestore->shouldNotReceive('collection')
+                ->with('audit_logs');
         }
 
         $firestore->shouldReceive('runTransaction')

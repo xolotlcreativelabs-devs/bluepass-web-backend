@@ -3,12 +3,15 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\AuditLogger;
 use Google\Cloud\Firestore\FieldValue;
 use Google\Cloud\Firestore\FirestoreClient;
+use Google\Cloud\Firestore\Transaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use RuntimeException;
 use Throwable;
 
 class NewsController extends Controller
@@ -18,7 +21,8 @@ class NewsController extends Controller
      */
     public function store(
         Request $request,
-        FirestoreClient $firestore
+        FirestoreClient $firestore,
+        AuditLogger $auditLogger
     ): JsonResponse {
         // Obtener la identidad del usuario.
         $uid = $request->attributes->get('firebase_uid');
@@ -109,11 +113,18 @@ class NewsController extends Controller
         }
 
         try {
-            // Crear el documento de Firestore.
+            // Preparar las referencias de Firestore.
             $document = $firestore
                 ->collection('news')
                 ->newDocument();
 
+            $auditDocument = $firestore
+                ->collection('audit_logs')
+                ->newDocument();
+
+            $newsId = $document->id();
+
+            // Preparar los datos de la noticia.
             $news = [
                 'authorId' => $uid,
                 'title' => $data['title'],
@@ -124,12 +135,43 @@ class NewsController extends Controller
                 'updatedAt' => FieldValue::serverTimestamp(),
             ];
 
-            $document->set($news);
+            // Preparar la auditoría con el servicio centralizado.
+            $auditData = $auditLogger->prepare(
+                'created',
+                'news',
+                $newsId,
+                $uid,
+                $role,
+                array_keys($data)
+            );
+
+            if ($auditData === null) {
+                throw new RuntimeException(
+                    'No fue posible preparar la auditoría.'
+                );
+            }
+
+            // Guardar la noticia y su auditoría en una transacción.
+            $firestore->runTransaction(
+                function (Transaction $transaction) use (
+                    $document,
+                    $auditDocument,
+                    $news,
+                    $auditData
+                ): void {
+                    $transaction->create($document, $news);
+
+                    $transaction->create(
+                        $auditDocument,
+                        $auditData
+                    );
+                }
+            );
 
             return response()->json([
                 'message' => 'Noticia registrada como borrador.',
                 'news' => [
-                    'id' => $document->id(),
+                    'id' => $newsId,
                     'authorId' => $uid,
                     'title' => $news['title'],
                     'content' => $news['content'],
@@ -271,7 +313,8 @@ class NewsController extends Controller
     public function update(
         Request $request,
         string $id,
-        FirestoreClient $firestore
+        FirestoreClient $firestore,
+        AuditLogger $auditLogger
     ): JsonResponse {
         // Obtener la identidad del usuario.
         $uid = $request->attributes->get('firebase_uid');
@@ -380,66 +423,119 @@ class NewsController extends Controller
         }
 
         try {
-            // Buscar la noticia.
+            // Buscar la referencia de la noticia.
             $document = $firestore
                 ->collection('news')
                 ->document($id);
 
-            $snapshot = $document->snapshot();
+            // Consultar permisos y guardar cambios en una transacción.
+            $result = $firestore->runTransaction(
+                function (Transaction $transaction) use (
+                    $firestore,
+                    $document,
+                    $id,
+                    $uid,
+                    $role,
+                    $data,
+                    $auditLogger
+                ): array {
+                    $snapshot = $transaction->snapshot($document);
 
-            if (!$snapshot->exists()) {
-                return response()->json([
-                    'message' => 'La noticia no existe.',
-                ], 404);
-            }
+                    if (!$snapshot->exists()) {
+                        return [
+                            'code' => 404,
+                            'message' => 'La noticia no existe.',
+                        ];
+                    }
 
-            $news = $snapshot->data();
+                    $news = $snapshot->data();
 
-            if (!is_array($news)) {
-                return response()->json([
-                    'message' => 'No fue posible obtener la noticia.',
-                ], 500);
-            }
+                    if (!is_array($news)) {
+                        return [
+                            'code' => 500,
+                            'message' => 'No fue posible obtener la noticia.',
+                        ];
+                    }
 
-            // Verificar que el vendedor sea el autor.
-            if (
-                $role === 'seller' &&
-                ($news['authorId'] ?? null) !== $uid
-            ) {
-                return response()->json([
-                    'message' => 'No tienes permisos para editar esta noticia.',
-                ], 403);
-            }
+                    // El vendedor solo puede editar noticias propias.
+                    if (
+                        $role === 'seller' &&
+                        ($news['authorId'] ?? null) !== $uid
+                    ) {
+                        return [
+                            'code' => 403,
+                            'message' =>
+                                'No tienes permisos para editar esta noticia.',
+                        ];
+                    }
 
-            // Preparar los campos modificados.
-            $updates = [];
+                    // Preparar únicamente los campos modificados.
+                    $updates = [];
 
-            foreach ($data as $field => $value) {
-                $updates[] = [
-                    'path' => $field,
-                    'value' => $value,
-                ];
-            }
+                    foreach ($data as $field => $value) {
+                        $updates[] = [
+                            'path' => $field,
+                            'value' => $value,
+                        ];
+                    }
 
-            // Registrar la última modificación.
-            $updates[] = [
-                'path' => 'updatedAt',
-                'value' => FieldValue::serverTimestamp(),
-            ];
+                    $updates[] = [
+                        'path' => 'updatedAt',
+                        'value' => FieldValue::serverTimestamp(),
+                    ];
 
-            $document->update($updates);
+                    // Preparar la auditoría con el servicio centralizado.
+                    $auditData = $auditLogger->prepare(
+                        'updated',
+                        'news',
+                        $id,
+                        $uid,
+                        $role,
+                        array_keys($data)
+                    );
 
-            return response()->json([
-                'message' => 'Noticia actualizada correctamente.',
-                'news' => array_merge(
-                    [
-                        'id' => $id,
-                        'authorId' => $news['authorId'] ?? null,
-                        'status' => $news['status'] ?? null,
-                    ],
-                    $data
-                ),
-            ], 200);
+                    if ($auditData === null) {
+                        throw new RuntimeException(
+                            'No fue posible preparar la auditoría.'
+                        );
+                    }
+
+                    $auditDocument = $firestore
+                        ->collection('audit_logs')
+                        ->newDocument();
+
+                    // Actualizar la noticia.
+                    $transaction->update($document, $updates);
+
+                    // Guardar la auditoría en la misma transacción.
+                    $transaction->create(
+                        $auditDocument,
+                        $auditData
+                    );
+
+                    return [
+                        'code' => 200,
+                        'message' => 'Noticia actualizada correctamente.',
+                        'news' => array_merge(
+                            [
+                                'id' => $id,
+                                'authorId' => $news['authorId'] ?? null,
+                                'status' => $news['status'] ?? null,
+                            ],
+                            $data
+                        ),
+                    ];
+                }
+            );
+
+            $statusCode = $result['code'] ?? 500;
+
+            unset($result['code']);
+
+            return response()->json(
+                $result,
+                $statusCode
+            );
 
         } catch (Throwable $e) {
             Log::error('Error al actualizar noticia BluePass', [
