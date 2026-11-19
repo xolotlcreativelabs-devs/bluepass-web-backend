@@ -81,10 +81,10 @@ Route::middleware('throttle:bluepass-api')->group(function () {
     Route::get('/news/{id}', [NewsController::class, 'show']);
 });
 
-// Rutas protegidas de noticias.
+// Rutas de noticias exclusivas del administrador.
 Route::middleware([
     'throttle:bluepass-api',
-    'firebase.auth:seller,admin',
+    'firebase.auth:admin',
 ])->group(function () {
 
     // Registrar noticias como borradores.

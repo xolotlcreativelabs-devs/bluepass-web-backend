@@ -34,7 +34,8 @@ class NewsController extends Controller
             ], 401);
         }
 
-        if (!in_array($role, ['seller', 'admin'], true)) {
+        // Solo el administrador puede registrar noticias.
+        if ($role !== 'admin') {
             return response()->json([
                 'message' => 'No tienes permisos para crear noticias.',
             ], 403);
@@ -326,7 +327,8 @@ class NewsController extends Controller
             ], 401);
         }
 
-        if (!in_array($role, ['seller', 'admin'], true)) {
+        // Solo el administrador puede editar noticias.
+        if ($role !== 'admin') {
             return response()->json([
                 'message' => 'No tienes permisos para editar noticias.',
             ], 403);
@@ -454,18 +456,6 @@ class NewsController extends Controller
                         return [
                             'code' => 500,
                             'message' => 'No fue posible obtener la noticia.',
-                        ];
-                    }
-
-                    // El vendedor solo puede editar noticias propias.
-                    if (
-                        $role === 'seller' &&
-                        ($news['authorId'] ?? null) !== $uid
-                    ) {
-                        return [
-                            'code' => 403,
-                            'message' =>
-                                'No tienes permisos para editar esta noticia.',
                         ];
                     }
 

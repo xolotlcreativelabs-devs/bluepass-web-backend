@@ -48,11 +48,23 @@ class NewsControllerTest extends TestCase
     }
 
     /**
-     * Permitir que un vendedor registre una noticia.
+     * Impedir que los vendedores registren noticias.
      */
-    public function test_seller_can_create_news(): void
+    public function test_seller_cannot_create_news(): void
     {
-        $this->mockUser('seller', true);
+        $this->mockUser('seller');
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/news', $this->newsData())
+            ->assertStatus(403);
+    }
+
+    /**
+     * Permitir que un administrador registre noticias.
+     */
+    public function test_admin_can_create_news(): void
+    {
+        $this->mockUser('admin', true);
 
         $this->withToken('token-ficticio')
             ->postJson('/api/news', $this->newsData())
@@ -74,24 +86,11 @@ class NewsControllerTest extends TestCase
     }
 
     /**
-     * Permitir que un administrador registre noticias.
-     */
-    public function test_admin_can_create_news(): void
-    {
-        $this->mockUser('admin', true);
-
-        $this->withToken('token-ficticio')
-            ->postJson('/api/news', $this->newsData())
-            ->assertStatus(201)
-            ->assertJsonPath('news.status', 'draft');
-    }
-
-    /**
      * Rechazar noticias sin título ni contenido.
      */
     public function test_news_rejects_missing_fields(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
 
         $this->withToken('token-ficticio')
             ->postJson('/api/news', [])
@@ -107,7 +106,7 @@ class NewsControllerTest extends TestCase
      */
     public function test_news_rejects_protected_fields(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
 
         $data = $this->newsData();
         $data['authorId'] = 'otro-usuario';
@@ -249,7 +248,6 @@ class NewsControllerTest extends TestCase
         string $uid,
         string $role
     ): void {
-        // Preparar el documento de la noticia.
         $document = Mockery::mock(
             DocumentReference::class
         );
@@ -258,7 +256,6 @@ class NewsControllerTest extends TestCase
             ->once()
             ->andReturn('noticia-prueba');
 
-        // No deben realizarse escrituras fuera de la transacción.
         $document->shouldNotReceive('set');
         $document->shouldNotReceive('update');
 
@@ -293,12 +290,11 @@ class NewsControllerTest extends TestCase
             ->with('audit_logs')
             ->andReturn($auditCollection);
 
-        // Simular la transacción de Firestore.
         $transaction = Mockery::mock(
             Transaction::class
         );
 
-        // Verificar que la noticia se registre como borrador.
+        // Verificar los datos de la noticia.
         $transaction->shouldReceive('create')
             ->once()
             ->with(
@@ -319,7 +315,7 @@ class NewsControllerTest extends TestCase
                 })
             );
 
-        // Verificar los datos del registro de auditoría.
+        // Verificar que el administrador quede registrado.
         $transaction->shouldReceive('create')
             ->once()
             ->with(
@@ -340,7 +336,6 @@ class NewsControllerTest extends TestCase
 
         $transaction->shouldNotReceive('update');
 
-        // Ejecutar el callback para comprobar ambas escrituras.
         $firestore->shouldReceive('runTransaction')
             ->once()
             ->with(Mockery::type('callable'))

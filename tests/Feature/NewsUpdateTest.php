@@ -51,31 +51,17 @@ class NewsUpdateTest extends TestCase
     }
 
     /**
-     * Permitir que un vendedor edite su propia noticia.
+     * Impedir que un vendedor edite su propia noticia.
      */
-    public function test_seller_can_update_own_news(): void
+    public function test_seller_cannot_update_own_news(): void
     {
-        $this->mockUser('seller', 'update-own');
+        $this->mockUser('seller');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [
-                'title' => '  Noticia actualizada  ',
+                'title' => 'Noticia actualizada',
             ])
-            ->assertStatus(200)
-            ->assertJsonPath(
-                'message',
-                'Noticia actualizada correctamente.'
-            )
-            ->assertJsonPath('news.id', 'noticia-prueba')
-            ->assertJsonPath(
-                'news.authorId',
-                'firebase-uid-prueba'
-            )
-            ->assertJsonPath(
-                'news.title',
-                'Noticia actualizada'
-            )
-            ->assertJsonPath('news.status', 'draft');
+            ->assertStatus(403);
     }
 
     /**
@@ -83,17 +69,13 @@ class NewsUpdateTest extends TestCase
      */
     public function test_seller_cannot_update_another_sellers_news(): void
     {
-        $this->mockUser('seller', 'update-other');
+        $this->mockUser('seller');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [
                 'title' => 'Noticia actualizada',
             ])
-            ->assertStatus(403)
-            ->assertJsonPath(
-                'message',
-                'No tienes permisos para editar esta noticia.'
-            );
+            ->assertStatus(403);
     }
 
     /**
@@ -123,11 +105,11 @@ class NewsUpdateTest extends TestCase
     }
 
     /**
-     * Permitir eliminar el resumen opcional.
+     * Permitir que un administrador elimine el resumen opcional.
      */
-    public function test_seller_can_clear_news_summary(): void
+    public function test_admin_can_clear_news_summary(): void
     {
-        $this->mockUser('seller', 'update-summary');
+        $this->mockUser('admin', 'update-summary');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [
@@ -143,7 +125,7 @@ class NewsUpdateTest extends TestCase
      */
     public function test_news_update_rejects_missing_news(): void
     {
-        $this->mockUser('seller', 'update-missing');
+        $this->mockUser('admin', 'update-missing');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [
@@ -161,7 +143,7 @@ class NewsUpdateTest extends TestCase
      */
     public function test_news_update_rejects_protected_fields(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [
@@ -180,7 +162,7 @@ class NewsUpdateTest extends TestCase
      */
     public function test_news_update_rejects_empty_request(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [])
@@ -196,7 +178,7 @@ class NewsUpdateTest extends TestCase
      */
     public function test_news_update_rejects_invalid_title(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [
@@ -211,7 +193,7 @@ class NewsUpdateTest extends TestCase
      */
     public function test_news_update_handles_firestore_failure(): void
     {
-        $this->mockUser('seller', 'update-error');
+        $this->mockUser('admin', 'update-error');
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba', [

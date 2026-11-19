@@ -17,11 +17,11 @@ use Tests\TestCase;
 class NewsStatusControllerTest extends TestCase
 {
     /**
-     * Publicar una noticia que está en borrador.
+     * Permitir que el administrador publique un borrador.
      */
-    public function test_seller_can_publish_draft_news(): void
+    public function test_admin_can_publish_draft_news(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
         $this->mockNews('draft', 'published');
 
         $this->withToken('token-ficticio')
@@ -38,11 +38,11 @@ class NewsStatusControllerTest extends TestCase
     }
 
     /**
-     * Despublicar una noticia publicada.
+     * Permitir que el administrador despublique noticias.
      */
-    public function test_seller_can_unpublish_news(): void
+    public function test_admin_can_unpublish_news(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
         $this->mockNews('published', 'unpublished');
 
         $this->withToken('token-ficticio')
@@ -58,11 +58,11 @@ class NewsStatusControllerTest extends TestCase
     }
 
     /**
-     * Volver a publicar una noticia despublicada.
+     * Permitir que el administrador vuelva a publicar noticias.
      */
-    public function test_seller_can_republish_news(): void
+    public function test_admin_can_republish_news(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
         $this->mockNews('unpublished', 'published');
 
         $this->withToken('token-ficticio')
@@ -78,7 +78,7 @@ class NewsStatusControllerTest extends TestCase
      */
     public function test_news_rejects_same_status(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
         $this->mockNews('published', null);
 
         $this->withToken('token-ficticio')
@@ -93,11 +93,11 @@ class NewsStatusControllerTest extends TestCase
     }
 
     /**
-     * Impedir despublicar un borrador.
+     * Impedir despublicar una noticia que es borrador.
      */
     public function test_draft_news_cannot_be_unpublished(): void
     {
-        $this->mockUser('seller');
+        $this->mockUser('admin');
         $this->mockNews('draft', null);
 
         $this->withToken('token-ficticio')
@@ -112,22 +112,33 @@ class NewsStatusControllerTest extends TestCase
     }
 
     /**
-     * Impedir que un vendedor publique noticias ajenas.
+     * Impedir que un vendedor publique noticias.
      */
-    public function test_seller_cannot_publish_another_sellers_news(): void
+    public function test_seller_cannot_publish_news(): void
     {
         $this->mockUser('seller');
-        $this->mockNews('draft', null, 'otro-vendedor');
+        $this->expectNoNewsChanges();
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
                 'status' => 'published',
             ])
-            ->assertStatus(403)
-            ->assertJsonPath(
-                'message',
-                'No tienes permisos sobre esta noticia.'
-            );
+            ->assertStatus(403);
+    }
+
+    /**
+     * Impedir que un vendedor despublique noticias.
+     */
+    public function test_seller_cannot_unpublish_news(): void
+    {
+        $this->mockUser('seller');
+        $this->expectNoNewsChanges();
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/news/noticia-prueba/status', [
+                'status' => 'unpublished',
+            ])
+            ->assertStatus(403);
     }
 
     /**
@@ -136,7 +147,12 @@ class NewsStatusControllerTest extends TestCase
     public function test_admin_can_publish_another_sellers_news(): void
     {
         $this->mockUser('admin');
-        $this->mockNews('draft', 'published', 'otro-vendedor', 'admin');
+
+        $this->mockNews(
+            'draft',
+            'published',
+            'otro-vendedor'
+        );
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -156,18 +172,7 @@ class NewsStatusControllerTest extends TestCase
     public function test_customer_cannot_change_news_status(): void
     {
         $this->mockUser('customer');
-
-        $firestore = $this->app->make(
-            FirestoreClient::class
-        );
-
-        $firestore->shouldNotReceive('collection')
-            ->with('news');
-
-        $firestore->shouldNotReceive('collection')
-            ->with('audit_logs');
-
-        $firestore->shouldNotReceive('runTransaction');
+        $this->expectNoNewsChanges();
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -185,10 +190,12 @@ class NewsStatusControllerTest extends TestCase
         $auth->shouldNotReceive('verifyIdToken');
 
         $firestore = Mockery::mock(FirestoreClient::class);
+
         $firestore->shouldNotReceive('collection');
         $firestore->shouldNotReceive('runTransaction');
 
         $this->app->instance(Auth::class, $auth);
+
         $this->app->instance(
             FirestoreClient::class,
             $firestore
@@ -288,13 +295,31 @@ class NewsStatusControllerTest extends TestCase
     }
 
     /**
+     * Confirmar que una solicitud rechazada no modifica noticias.
+     */
+    private function expectNoNewsChanges(): void
+    {
+        $firestore = $this->app->make(
+            FirestoreClient::class
+        );
+
+        $firestore->shouldNotReceive('collection')
+            ->with('news');
+
+        $firestore->shouldNotReceive('collection')
+            ->with('audit_logs');
+
+        $firestore->shouldNotReceive('runTransaction');
+    }
+
+    /**
      * Simular una noticia y su cambio de estado en Firestore.
      */
     private function mockNews(
         string $currentStatus,
         ?string $newStatus,
         string $authorId = 'firebase-uid-prueba',
-        string $actorRole = 'seller'
+        string $actorRole = 'admin'
     ): void {
         $firestore = $this->app->make(
             FirestoreClient::class
@@ -325,7 +350,7 @@ class NewsStatusControllerTest extends TestCase
         $document->shouldNotReceive('update');
 
         if ($newStatus !== null) {
-            // El ID se consulta para la auditoría y la respuesta.
+            // Consultar el ID para la auditoría y la respuesta.
             $document->shouldReceive('id')
                 ->twice()
                 ->andReturn('noticia-prueba');
@@ -355,7 +380,7 @@ class NewsStatusControllerTest extends TestCase
             ->andReturn($snapshot);
 
         if ($newStatus !== null) {
-            // Simular el documento del historial.
+            // Preparar el documento de auditoría.
             $auditDocument = Mockery::mock(
                 DocumentReference::class
             );
@@ -373,7 +398,7 @@ class NewsStatusControllerTest extends TestCase
                 ->with('audit_logs')
                 ->andReturn($auditCollection);
 
-            // Verificar que se actualice únicamente el estado.
+            // Verificar la actualización del estado.
             $transaction->shouldReceive('update')
                 ->once()
                 ->with(
@@ -405,30 +430,40 @@ class NewsStatusControllerTest extends TestCase
                     )
                 );
 
-            // Verificar la creación del historial en la transacción.
+            // Verificar la auditoría en la misma transacción.
             $transaction->shouldReceive('create')
                 ->once()
                 ->with(
                     $auditDocument,
                     Mockery::on(
-                        function ($data) use ($newStatus, $actorRole) {
+                        function ($data) use (
+                            $newStatus,
+                            $actorRole
+                        ) {
                             if (!is_array($data)) {
                                 return false;
                             }
 
                             return count($data) === 7
-                                && ($data['action'] ?? null) === $newStatus
-                                && ($data['resourceType'] ?? null) === 'news'
-                                && ($data['resourceId'] ?? null) === 'noticia-prueba'
-                                && ($data['actorId'] ?? null) === 'firebase-uid-prueba'
-                                && ($data['actorRole'] ?? null) === $actorRole
-                                && ($data['changedFields'] ?? null) === ['status']
+                                && ($data['action'] ?? null)
+                                    === $newStatus
+                                && ($data['resourceType'] ?? null)
+                                    === 'news'
+                                && ($data['resourceId'] ?? null)
+                                    === 'noticia-prueba'
+                                && ($data['actorId'] ?? null)
+                                    === 'firebase-uid-prueba'
+                                && ($data['actorRole'] ?? null)
+                                    === $actorRole
+                                && ($data['changedFields'] ?? null)
+                                    === ['status']
                                 && isset($data['createdAt']);
                         }
                     )
                 );
+
         } else {
-            // Las solicitudes rechazadas no modifican datos.
+            // Los estados rechazados no modifican Firestore.
             $transaction->shouldNotReceive('update');
             $transaction->shouldNotReceive('create');
 
@@ -436,6 +471,7 @@ class NewsStatusControllerTest extends TestCase
                 ->with('audit_logs');
         }
 
+        // Ejecutar la transacción simulada.
         $firestore->shouldReceive('runTransaction')
             ->once()
             ->with(Mockery::type('callable'))

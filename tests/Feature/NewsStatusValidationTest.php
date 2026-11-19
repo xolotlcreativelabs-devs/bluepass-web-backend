@@ -21,7 +21,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_status_is_required(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [])
@@ -34,7 +34,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_status_rejects_draft_value(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -49,7 +49,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_status_rejects_unknown_value(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -64,7 +64,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_status_rejects_extra_fields(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/news/noticia-prueba/status', [
@@ -83,7 +83,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_status_rejects_missing_news(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
         $this->mockNews(null);
 
         $this->withToken('token-ficticio')
@@ -102,7 +102,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_cannot_be_published_without_valid_title(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $this->mockNews([
             'authorId' => 'firebase-uid-prueba',
@@ -127,7 +127,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_cannot_be_published_without_valid_content(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $this->mockNews([
             'authorId' => 'firebase-uid-prueba',
@@ -152,7 +152,7 @@ class NewsStatusValidationTest extends TestCase
      */
     public function test_news_status_handles_firestore_failure(): void
     {
-        $this->mockSeller();
+        $this->mockAdmin();
 
         $firestore = $this->app->make(
             FirestoreClient::class
@@ -202,9 +202,9 @@ class NewsStatusValidationTest extends TestCase
     }
 
     /**
-     * Simular un vendedor autenticado de Firebase.
+     * Simular un administrador autenticado de Firebase.
      */
-    private function mockSeller(): void
+    private function mockAdmin(): void
     {
         $uid = 'firebase-uid-prueba';
 
@@ -218,7 +218,7 @@ class NewsStatusValidationTest extends TestCase
 
         $user = UserRecord::fromResponseData([
             'localId' => $uid,
-            'email' => 'vendedor@ejemplo.com',
+            'email' => 'administrador@ejemplo.com',
             'emailVerified' => true,
             'disabled' => false,
             'createdAt' => '2026-11-12T12:00:00Z',
@@ -238,7 +238,7 @@ class NewsStatusValidationTest extends TestCase
 
         $this->app->instance(Auth::class, $auth);
 
-        // Simular el perfil del vendedor.
+        // Simular el perfil del administrador.
         $profileSnapshot = Mockery::mock(
             DocumentSnapshot::class
         );
@@ -250,9 +250,9 @@ class NewsStatusValidationTest extends TestCase
         $profileSnapshot->shouldReceive('data')
             ->once()
             ->andReturn([
-                'name' => 'Vendedor de prueba',
-                'email' => 'vendedor@ejemplo.com',
-                'role' => 'seller',
+                'name' => 'Administrador de prueba',
+                'email' => 'administrador@ejemplo.com',
+                'role' => 'admin',
                 'status' => 'active',
                 'authSubject' => $uid,
             ]);

@@ -35,8 +35,8 @@ class NewsStatusController extends Controller
             ], 401);
         }
 
-        // Permitir únicamente vendedores y administradores.
-        if (!in_array($role, ['seller', 'admin'], true)) {
+        // Solo el administrador puede gestionar noticias.
+        if ($role !== 'admin') {
             return response()->json([
                 'message' => 'No tienes permisos para gestionar noticias.',
             ], 403);
@@ -109,17 +109,6 @@ class NewsStatusController extends Controller
                         return [
                             'code' => 500,
                             'message' => 'No fue posible obtener la noticia.',
-                        ];
-                    }
-
-                    // El vendedor solo administra sus propias noticias.
-                    if (
-                        $role === 'seller' &&
-                        ($news['authorId'] ?? null) !== $uid
-                    ) {
-                        return [
-                            'code' => 403,
-                            'message' => 'No tienes permisos sobre esta noticia.',
                         ];
                     }
 
