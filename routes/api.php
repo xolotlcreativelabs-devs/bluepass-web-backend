@@ -1,6 +1,8 @@
+
 <?php
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\RegisterCustomerController;
 use App\Http\Controllers\Api\UserProfileController;
@@ -33,4 +35,17 @@ Route::middleware([
 
     // Actualizar el nombre del perfil.
     Route::patch('/users/me', [UserProfileController::class, 'update']);
+});
+
+// Rutas protegidas de eventos.
+Route::middleware([
+    'throttle:bluepass-api',
+    'firebase.auth:seller,admin',
+])->group(function () {
+
+    // Registrar eventos como borradores.
+    Route::post('/events', [EventController::class, 'store']);
+
+    // Editar eventos existentes.
+    Route::patch('/events/{id}', [EventController::class, 'update']);
 });
