@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\EventImageController;
+use App\Http\Controllers\Api\EventStatusController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\RegisterCustomerController;
 use App\Http\Controllers\Api\UserProfileController;
@@ -48,6 +49,9 @@ Route::middleware([
 
     // Editar eventos existentes.
     Route::patch('/events/{id}', [EventController::class, 'update']);
+
+    // Publicar o despublicar un evento.
+    Route::patch('/events/{id}/status', [EventStatusController::class, 'update']);
 
     // Consultar imágenes de un evento.
     Route::get('/events/{id}/images', [EventImageController::class, 'index']);
