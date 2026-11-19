@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Services\AuditLogger;
 use DateTimeInterface;
+use DateTimeZone;
 use Google\Cloud\Core\Timestamp;
 use Google\Cloud\Firestore\FieldValue;
 use Google\Cloud\Firestore\FirestoreClient;
@@ -147,7 +148,7 @@ class EventStatusController extends Controller
                         ];
                     }
 
-                    // Comprobar las fechas al publicar o republicar.
+                    // Comprobar fechas y zona horaria al publicar.
                     if (
                         $newStatus === 'published' &&
                         !$this->hasValidDates($event)
@@ -239,12 +240,26 @@ class EventStatusController extends Controller
     }
 
     /**
-     * Comprobar que el evento tenga fechas válidas.
+     * Comprobar las fechas y la zona horaria del evento.
      */
     private function hasValidDates(array $event): bool
     {
         $start = $event['date'] ?? null;
         $end = $event['endAt'] ?? null;
+        $timezone = $event['timezone'] ?? null;
+
+        // Exigir una zona horaria reconocida por PHP.
+        if (
+            !is_string($timezone) ||
+            $timezone === '' ||
+            !in_array(
+                $timezone,
+                DateTimeZone::listIdentifiers(DateTimeZone::ALL_WITH_BC),
+                true
+            )
+        ) {
+            return false;
+        }
 
         // Convertir las fechas almacenadas en Firestore.
         if ($start instanceof Timestamp) {
@@ -263,7 +278,8 @@ class EventStatusController extends Controller
             return false;
         }
 
-        // La finalización debe ser posterior al inicio.
+        // La finalización debe ser posterior al inicio real.
+        // Los distintos desfases UTC no afectan la comparación.
         return $end->getTimestamp() > $start->getTimestamp();
     }
 }

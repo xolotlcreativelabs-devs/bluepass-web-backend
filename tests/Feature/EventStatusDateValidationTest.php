@@ -20,10 +20,10 @@ use Tests\TestCase;
 class EventStatusDateValidationTest extends TestCase
 {
     /**
-     * Probar los casos de fechas que impiden publicar.
+     * Rechazar eventos con fechas o zona horaria inválidas.
      */
-    #[DataProvider('invalidDates')]
-    public function test_event_cannot_be_published_with_invalid_dates(
+    #[DataProvider('invalidEventData')]
+    public function test_event_cannot_be_published_with_invalid_data(
         string $scenario
     ): void {
         $this->mockSeller();
@@ -32,6 +32,7 @@ class EventStatusDateValidationTest extends TestCase
             'sellerId' => 'firebase-uid-prueba',
             'status' => 'draft',
             'name' => 'Evento de prueba',
+            'timezone' => 'America/Mexico_City',
             'date' => new Timestamp(
                 new DateTimeImmutable('2026-12-10T18:00:00-06:00')
             ),
@@ -40,7 +41,7 @@ class EventStatusDateValidationTest extends TestCase
             ),
         ];
 
-        // Preparar las fechas incorrectas de cada escenario.
+        // Preparar los datos incorrectos de cada escenario.
         switch ($scenario) {
             case 'missing-both':
                 $event['date'] = null;
@@ -62,11 +63,23 @@ class EventStatusDateValidationTest extends TestCase
                     new DateTimeImmutable('2026-12-10T18:00:00-06:00')
                 );
                 break;
+
+            case 'missing-timezone':
+                unset($event['timezone']);
+                break;
+
+            case 'invalid-timezone':
+                $event['timezone'] = 'America/ZonaInexistente';
+                break;
+
+            case 'invalid-timezone-type':
+                $event['timezone'] = 123;
+                break;
         }
 
         $this->mockEvent($event);
 
-        // Ningún escenario debe permitir la publicación.
+        // No permitir la publicación con datos inválidos.
         $this->withToken('token-ficticio')
             ->patchJson('/api/events/evento-prueba/status', [
                 'status' => 'published',
@@ -74,21 +87,26 @@ class EventStatusDateValidationTest extends TestCase
             ->assertStatus(422)
             ->assertJsonPath(
                 'message',
-                'El evento necesita fechas de inicio y '.
+                'El evento necesita fechas de inicio y ' .
                 'finalización válidas para publicarse.'
             );
     }
 
     /**
-     * Casos que deben rechazarse.
+     * Escenarios que deben rechazarse.
      */
-    public static function invalidDates(): array
+    public static function invalidEventData(): array
     {
         return [
             'sin fechas' => ['missing-both'],
             'sin fecha final' => ['missing-end'],
             'fecha final anterior' => ['end-before-start'],
             'fechas iguales' => ['equal-dates'],
+            'sin zona horaria' => ['missing-timezone'],
+            'zona horaria inexistente' => ['invalid-timezone'],
+            'zona horaria con tipo incorrecto' => [
+                'invalid-timezone-type',
+            ],
         ];
     }
 
@@ -165,7 +183,9 @@ class EventStatusDateValidationTest extends TestCase
             ->with($uid)
             ->andReturn($userDocument);
 
-        $firestore = Mockery::mock(FirestoreClient::class);
+        $firestore = Mockery::mock(
+            FirestoreClient::class
+        );
 
         $firestore->shouldReceive('collection')
             ->once()
@@ -228,8 +248,12 @@ class EventStatusDateValidationTest extends TestCase
             ->with($document)
             ->andReturn($snapshot);
 
-        // El evento no debe modificarse si las fechas son inválidas.
+        // No debe haber escrituras para eventos inválidos.
         $transaction->shouldNotReceive('update');
+        $transaction->shouldNotReceive('create');
+
+        $firestore->shouldNotReceive('collection')
+            ->with('audit_logs');
 
         $firestore->shouldReceive('runTransaction')
             ->once()

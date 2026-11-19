@@ -243,11 +243,12 @@ class EventStatusControllerTest extends TestCase
             FirestoreClient::class
         );
 
-        // Incluir fechas válidas tal como las guarda Firestore.
+        // Incluir fechas y zona horaria válidas.
         $event = [
             'sellerId' => 'firebase-uid-prueba',
             'status' => $currentStatus,
             'name' => 'Evento de prueba',
+            'timezone' => 'America/Mexico_City',
             'date' => new Timestamp(
                 new DateTimeImmutable('2026-12-10T18:00:00-06:00')
             ),
@@ -361,7 +362,7 @@ class EventStatusControllerTest extends TestCase
                     )
                 );
 
-            // Verificar que la auditoría se guarde en la transacción.
+            // Verificar la auditoría dentro de la transacción.
             $transaction->shouldReceive('create')
                 ->once()
                 ->with(
@@ -375,14 +376,18 @@ class EventStatusControllerTest extends TestCase
                             return count($data) === 7
                                 && ($data['action'] ?? null) === $newStatus
                                 && ($data['resourceType'] ?? null) === 'events'
-                                && ($data['resourceId'] ?? null) === 'evento-prueba'
-                                && ($data['actorId'] ?? null) === 'firebase-uid-prueba'
+                                && ($data['resourceId'] ?? null)
+                                    === 'evento-prueba'
+                                && ($data['actorId'] ?? null)
+                                    === 'firebase-uid-prueba'
                                 && ($data['actorRole'] ?? null) === 'seller'
-                                && ($data['changedFields'] ?? null) === ['status']
+                                && ($data['changedFields'] ?? null)
+                                    === ['status']
                                 && isset($data['createdAt']);
                         }
                     )
                 );
+
         } else {
             // No registrar cambios ni auditoría cuando se rechaza.
             $transaction->shouldNotReceive('update');

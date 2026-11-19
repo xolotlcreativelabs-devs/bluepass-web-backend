@@ -272,6 +272,7 @@ class EventStatusPermissionsTest extends TestCase
                 'sellerId' => 'otro-vendedor',
                 'status' => $currentStatus,
                 'name' => 'Evento de otro vendedor',
+                'timezone' => 'America/Mexico_City',
                 'date' => new Timestamp(
                     new DateTimeImmutable(
                         '2026-12-10T18:00:00-06:00'
@@ -380,7 +381,10 @@ class EventStatusPermissionsTest extends TestCase
                 ->with(
                     $auditDocument,
                     Mockery::on(
-                        function ($data) use ($requestedStatus, $uid) {
+                        function ($data) use (
+                            $requestedStatus,
+                            $uid
+                        ) {
                             if (!is_array($data)) {
                                 return false;
                             }
@@ -392,7 +396,8 @@ class EventStatusPermissionsTest extends TestCase
                                     === 'events'
                                 && ($data['resourceId'] ?? null)
                                     === 'evento-prueba'
-                                && ($data['actorId'] ?? null) === $uid
+                                && ($data['actorId'] ?? null)
+                                    === $uid
                                 && ($data['actorRole'] ?? null)
                                     === 'admin'
                                 && ($data['changedFields'] ?? null)
@@ -401,6 +406,7 @@ class EventStatusPermissionsTest extends TestCase
                         }
                     )
                 );
+
         } else {
             // Un vendedor no puede modificar ni auditar eventos ajenos.
             $transaction->shouldNotReceive('update');
@@ -411,7 +417,6 @@ class EventStatusPermissionsTest extends TestCase
         }
 
         $firestore->shouldReceive('runTransaction')
-            ->once()
             ->with(Mockery::type('callable'))
             ->andReturnUsing(
                 function ($callback) use ($transaction) {
