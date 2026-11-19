@@ -154,6 +154,20 @@ class EventControllerTest extends TestCase
     }
 
     /**
+     * Impedir que un comprador edite eventos.
+     */
+    public function test_customer_cannot_update_events(): void
+    {
+        $this->mockUser('customer');
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba', [
+                'name' => 'Evento modificado',
+            ])
+            ->assertStatus(403);
+    }
+
+    /**
      * Permitir editar un evento propio.
      */
     public function test_seller_can_update_own_event(): void

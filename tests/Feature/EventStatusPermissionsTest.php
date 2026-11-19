@@ -23,7 +23,12 @@ class EventStatusPermissionsTest extends TestCase
      */
     public function test_seller_cannot_publish_another_sellers_event(): void
     {
-        $this->mockUserAndEvent('seller', false);
+        $this->mockUserAndEvent(
+            'seller',
+            false,
+            'draft',
+            'published'
+        );
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/events/evento-prueba/status', [
@@ -37,11 +42,39 @@ class EventStatusPermissionsTest extends TestCase
     }
 
     /**
-     * Un administrador puede publicar eventos de otros usuarios.
+     * Un vendedor no puede despublicar eventos ajenos.
+     */
+    public function test_seller_cannot_unpublish_another_sellers_event(): void
+    {
+        $this->mockUserAndEvent(
+            'seller',
+            false,
+            'published',
+            'unpublished'
+        );
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba/status', [
+                'status' => 'unpublished',
+            ])
+            ->assertStatus(403)
+            ->assertJsonPath(
+                'message',
+                'No tienes permisos sobre este evento.'
+            );
+    }
+
+    /**
+     * Un administrador puede publicar eventos ajenos.
      */
     public function test_admin_can_publish_another_sellers_event(): void
     {
-        $this->mockUserAndEvent('admin', true);
+        $this->mockUserAndEvent(
+            'admin',
+            true,
+            'draft',
+            'published'
+        );
 
         $this->withToken('token-ficticio')
             ->patchJson('/api/events/evento-prueba/status', [
@@ -57,15 +90,80 @@ class EventStatusPermissionsTest extends TestCase
     }
 
     /**
-     * Simular usuario autenticado y evento ajeno.
+     * Un administrador puede despublicar eventos ajenos.
+     */
+    public function test_admin_can_unpublish_another_sellers_event(): void
+    {
+        $this->mockUserAndEvent(
+            'admin',
+            true,
+            'published',
+            'unpublished'
+        );
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba/status', [
+                'status' => 'unpublished',
+            ])
+            ->assertStatus(200)
+            ->assertJsonPath(
+                'message',
+                'Evento despublicado correctamente.'
+            )
+            ->assertJsonPath('event.id', 'evento-prueba')
+            ->assertJsonPath('event.status', 'unpublished');
+    }
+
+    /**
+     * Un comprador no puede publicar eventos.
+     */
+    public function test_customer_cannot_publish_events(): void
+    {
+        $this->mockUserAndEvent(
+            'customer',
+            false,
+            'draft',
+            'published'
+        );
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba/status', [
+                'status' => 'published',
+            ])
+            ->assertStatus(403);
+    }
+
+    /**
+     * Un comprador no puede despublicar eventos.
+     */
+    public function test_customer_cannot_unpublish_events(): void
+    {
+        $this->mockUserAndEvent(
+            'customer',
+            false,
+            'published',
+            'unpublished'
+        );
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba/status', [
+                'status' => 'unpublished',
+            ])
+            ->assertStatus(403);
+    }
+
+    /**
+     * Simular usuario autenticado y permisos sobre un evento.
      */
     private function mockUserAndEvent(
         string $role,
-        bool $canUpdate
+        bool $canUpdate,
+        string $currentStatus,
+        string $requestedStatus
     ): void {
         $uid = 'firebase-uid-prueba';
 
-        // Simular token de Firebase.
+        // Simular el token de Firebase.
         $token = Mockery::mock(UnencryptedToken::class);
 
         $token->shouldReceive('claims')
@@ -132,8 +230,31 @@ class EventStatusPermissionsTest extends TestCase
             ->with($uid)
             ->andReturn($userDocument);
 
-        // El evento pertenece a otro vendedor.
-        // Incluimos fechas válidas para permitir su publicación.
+        $firestore = Mockery::mock(
+            FirestoreClient::class
+        );
+
+        $firestore->shouldReceive('collection')
+            ->once()
+            ->with('users')
+            ->andReturn($users);
+
+        if ($role === 'customer') {
+            // Los compradores no deben consultar el evento.
+            $firestore->shouldNotReceive('collection')
+                ->with('events');
+
+            $firestore->shouldNotReceive('runTransaction');
+
+            $this->app->instance(
+                FirestoreClient::class,
+                $firestore
+            );
+
+            return;
+        }
+
+        // Simular un evento perteneciente a otro vendedor.
         $eventSnapshot = Mockery::mock(
             DocumentSnapshot::class
         );
@@ -146,7 +267,7 @@ class EventStatusPermissionsTest extends TestCase
             ->once()
             ->andReturn([
                 'sellerId' => 'otro-vendedor',
-                'status' => 'draft',
+                'status' => $currentStatus,
                 'name' => 'Evento de otro vendedor',
                 'date' => new Timestamp(
                     new DateTimeImmutable(
@@ -164,7 +285,7 @@ class EventStatusPermissionsTest extends TestCase
             DocumentReference::class
         );
 
-        // El documento no debe actualizarse directamente.
+        // Todas las modificaciones deben hacerse en la transacción.
         $eventDocument->shouldNotReceive('update');
 
         if ($canUpdate) {
@@ -182,8 +303,15 @@ class EventStatusPermissionsTest extends TestCase
             ->with('evento-prueba')
             ->andReturn($eventDocument);
 
+        $firestore->shouldReceive('collection')
+            ->once()
+            ->with('events')
+            ->andReturn($events);
+
         // Simular la transacción de Firestore.
-        $transaction = Mockery::mock(Transaction::class);
+        $transaction = Mockery::mock(
+            Transaction::class
+        );
 
         $transaction->shouldReceive('snapshot')
             ->once()
@@ -191,53 +319,41 @@ class EventStatusPermissionsTest extends TestCase
             ->andReturn($eventSnapshot);
 
         if ($canUpdate) {
-            // El administrador puede cambiar el estado.
+            // Verificar el estado guardado por el administrador.
             $transaction->shouldReceive('update')
                 ->once()
                 ->with(
                     $eventDocument,
-                    Mockery::on(function ($updates) {
-                        if (!is_array($updates)) {
-                            return false;
-                        }
-
-                        $fields = [];
-
-                        foreach ($updates as $update) {
-                            if (
-                                !is_array($update) ||
-                                !isset($update['path']) ||
-                                !array_key_exists('value', $update)
-                            ) {
+                    Mockery::on(
+                        function ($updates) use ($requestedStatus) {
+                            if (!is_array($updates)) {
                                 return false;
                             }
 
-                            $fields[$update['path']] = $update['value'];
-                        }
+                            $fields = [];
 
-                        return ($fields['status'] ?? null)
-                            === 'published'
-                            && isset($fields['updatedAt']);
-                    })
+                            foreach ($updates as $update) {
+                                if (
+                                    !is_array($update) ||
+                                    !isset($update['path']) ||
+                                    !array_key_exists('value', $update)
+                                ) {
+                                    return false;
+                                }
+
+                                $fields[$update['path']] = $update['value'];
+                            }
+
+                            return ($fields['status'] ?? null)
+                                === $requestedStatus
+                                && isset($fields['updatedAt']);
+                        }
+                    )
                 );
         } else {
-            // El vendedor no debe modificar un evento ajeno.
+            // Un vendedor no debe modificar eventos ajenos.
             $transaction->shouldNotReceive('update');
         }
-
-        $firestore = Mockery::mock(
-            FirestoreClient::class
-        );
-
-        $firestore->shouldReceive('collection')
-            ->once()
-            ->with('users')
-            ->andReturn($users);
-
-        $firestore->shouldReceive('collection')
-            ->once()
-            ->with('events')
-            ->andReturn($events);
 
         $firestore->shouldReceive('runTransaction')
             ->once()
