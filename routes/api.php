@@ -4,6 +4,8 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\EventImageController;
 use App\Http\Controllers\Api\EventStatusController;
+use App\Http\Controllers\Api\NewsController;
+use App\Http\Controllers\Api\NewsStatusController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\RegisterCustomerController;
 use App\Http\Controllers\Api\UserProfileController;
@@ -67,4 +69,30 @@ Route::middleware([
 
     // Eliminar la portada o una imagen de la galería.
     Route::delete('/events/{id}/images/{imageId}', [EventImageController::class, 'destroy']);
+});
+
+// Rutas públicas de noticias.
+Route::middleware('throttle:bluepass-api')->group(function () {
+
+    // Consultar noticias publicadas.
+    Route::get('/news', [NewsController::class, 'index']);
+
+    // Consultar una noticia publicada.
+    Route::get('/news/{id}', [NewsController::class, 'show']);
+});
+
+// Rutas protegidas de noticias.
+Route::middleware([
+    'throttle:bluepass-api',
+    'firebase.auth:seller,admin',
+])->group(function () {
+
+    // Registrar noticias como borradores.
+    Route::post('/news', [NewsController::class, 'store']);
+
+    // Editar noticias existentes.
+    Route::patch('/news/{id}', [NewsController::class, 'update']);
+
+    // Publicar o despublicar una noticia.
+    Route::patch('/news/{id}/status', [NewsStatusController::class, 'update']);
 });
