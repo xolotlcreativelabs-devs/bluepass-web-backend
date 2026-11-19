@@ -1,8 +1,8 @@
-
 <?php
 
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\EventController;
+use App\Http\Controllers\Api\EventImageController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\RegisterCustomerController;
 use App\Http\Controllers\Api\UserProfileController;
@@ -48,4 +48,19 @@ Route::middleware([
 
     // Editar eventos existentes.
     Route::patch('/events/{id}', [EventController::class, 'update']);
+
+    // Consultar imágenes de un evento.
+    Route::get('/events/{id}/images', [EventImageController::class, 'index']);
+
+    // Subir o reemplazar la portada de un evento.
+    Route::post('/events/{id}/images/cover', [EventImageController::class, 'uploadCover']);
+
+    // Agregar imágenes a la galería de un evento.
+    Route::post('/events/{id}/images/gallery', [EventImageController::class, 'uploadGallery']);
+
+    // Consultar o descargar una imagen del evento.
+    Route::get('/events/{id}/images/{imageId}', [EventImageController::class, 'show']);
+
+    // Eliminar la portada o una imagen de la galería.
+    Route::delete('/events/{id}/images/{imageId}', [EventImageController::class, 'destroy']);
 });
