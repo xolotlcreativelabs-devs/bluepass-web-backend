@@ -23,7 +23,7 @@ class EventController extends Controller
         Request $request,
         FirestoreClient $firestore
     ): JsonResponse {
-        // Obtener el usuario autenticado.
+        // Obtener la identidad del usuario.
         $uid = $request->attributes->get('firebase_uid');
         $role = $request->attributes->get('firebase_role');
 
@@ -39,10 +39,11 @@ class EventController extends Controller
             ], 403);
         }
 
-        // Evitar cambios en campos protegidos.
+        // Comprobar los campos permitidos.
         $allowedFields = [
             'name',
             'description',
+            'category',
             'venue',
             'date',
             'endAt',
@@ -64,9 +65,14 @@ class EventController extends Controller
         $validator = Validator::make($request->all(), [
             'name' => ['required', 'string', 'min:3', 'max:150'],
             'description' => ['required', 'string', 'min:10', 'max:5000'],
+            'category' => ['required', 'string', 'min:2', 'max:80'],
             'venue' => ['required', 'string', 'min:3', 'max:250'],
             'timezone' => ['required', 'timezone'],
-            'date' => ['nullable', 'date_format:Y-m-d\TH:i:sP'],
+            'date' => [
+                'nullable',
+                'required_with:endAt',
+                'date_format:Y-m-d\TH:i:sP',
+            ],
             'endAt' => [
                 'nullable',
                 'required_with:date',
@@ -84,17 +90,32 @@ class EventController extends Controller
 
         $data = $validator->validated();
 
+        // Limpiar los campos de texto.
+        foreach (['name', 'description', 'category', 'venue'] as $field) {
+            $data[$field] = trim($data[$field]);
+
+            if ($data[$field] === '') {
+                return response()->json([
+                    'message' => 'Los datos del evento no son válidos.',
+                    'errors' => [
+                        $field => ['Este campo no puede estar vacío.'],
+                    ],
+                ], 422);
+            }
+        }
+
         try {
-            // Crear el evento en Firestore.
+            // Crear el documento de Firestore.
             $document = $firestore
                 ->collection('events')
                 ->newDocument();
 
             $event = [
                 'sellerId' => $uid,
-                'name' => trim($data['name']),
-                'description' => trim($data['description']),
-                'venue' => trim($data['venue']),
+                'name' => $data['name'],
+                'description' => $data['description'],
+                'category' => $data['category'],
+                'venue' => $data['venue'],
                 'timezone' => $data['timezone'],
                 'imageUrl' => null,
                 'date' => isset($data['date'])
@@ -117,6 +138,7 @@ class EventController extends Controller
                     'sellerId' => $uid,
                     'name' => $event['name'],
                     'description' => $event['description'],
+                    'category' => $event['category'],
                     'venue' => $event['venue'],
                     'timezone' => $event['timezone'],
                     'date' => $data['date'] ?? null,
@@ -144,7 +166,7 @@ class EventController extends Controller
         string $id,
         FirestoreClient $firestore
     ): JsonResponse {
-        // Obtener el usuario autenticado.
+        // Obtener la identidad del usuario.
         $uid = $request->attributes->get('firebase_uid');
         $role = $request->attributes->get('firebase_role');
 
@@ -160,10 +182,11 @@ class EventController extends Controller
             ], 403);
         }
 
-        // Permitir únicamente campos editables.
+        // Comprobar los campos permitidos.
         $allowedFields = [
             'name',
             'description',
+            'category',
             'venue',
             'date',
             'endAt',
@@ -187,16 +210,27 @@ class EventController extends Controller
             ], 422);
         }
 
-        // Validar los campos enviados.
+        // Validar únicamente los campos enviados.
         $validator = Validator::make($request->all(), [
-            'name' => ['sometimes', 'required', 'string', 'min:3', 'max:150'],
+            'name' => [
+                'sometimes', 'required', 'string', 'min:3', 'max:150',
+            ],
             'description' => [
                 'sometimes', 'required', 'string', 'min:10', 'max:5000',
             ],
-            'venue' => ['sometimes', 'required', 'string', 'min:3', 'max:250'],
+            'category' => [
+                'sometimes', 'required', 'string', 'min:2', 'max:80',
+            ],
+            'venue' => [
+                'sometimes', 'required', 'string', 'min:3', 'max:250',
+            ],
             'timezone' => ['sometimes', 'required', 'timezone'],
-            'date' => ['sometimes', 'required', 'date_format:Y-m-d\TH:i:sP'],
-            'endAt' => ['sometimes', 'required', 'date_format:Y-m-d\TH:i:sP'],
+            'date' => [
+                'sometimes', 'required', 'date_format:Y-m-d\TH:i:sP',
+            ],
+            'endAt' => [
+                'sometimes', 'required', 'date_format:Y-m-d\TH:i:sP',
+            ],
         ]);
 
         if ($validator->fails()) {
@@ -208,8 +242,24 @@ class EventController extends Controller
 
         $data = $validator->validated();
 
+        // Limpiar los campos de texto enviados.
+        foreach (['name', 'description', 'category', 'venue'] as $field) {
+            if (array_key_exists($field, $data)) {
+                $data[$field] = trim($data[$field]);
+
+                if ($data[$field] === '') {
+                    return response()->json([
+                        'message' => 'Los datos del evento no son válidos.',
+                        'errors' => [
+                            $field => ['Este campo no puede estar vacío.'],
+                        ],
+                    ], 422);
+                }
+            }
+        }
+
         try {
-            // Buscar el evento en Firestore.
+            // Buscar el evento.
             $document = $firestore
                 ->collection('events')
                 ->document($id);
@@ -230,7 +280,7 @@ class EventController extends Controller
                 ], 500);
             }
 
-            // El vendedor solo puede editar sus eventos.
+            // Comprobar la propiedad del evento.
             if (
                 $role === 'seller' &&
                 ($event['sellerId'] ?? null) !== $uid
@@ -240,7 +290,7 @@ class EventController extends Controller
                 ], 403);
             }
 
-            // Comprobar la coherencia de las fechas.
+            // Obtener las fechas nuevas o existentes.
             $start = $data['date'] ?? ($event['date'] ?? null);
             $end = $data['endAt'] ?? ($event['endAt'] ?? null);
 
@@ -260,6 +310,7 @@ class EventController extends Controller
                 $end = $end->format(DateTimeInterface::ATOM);
             }
 
+            // Evitar una finalización anterior al inicio.
             if (
                 $start !== null &&
                 $end !== null &&
@@ -275,20 +326,12 @@ class EventController extends Controller
                 ], 422);
             }
 
-            // Preparar únicamente los campos enviados.
+            // Preparar únicamente los campos modificados.
             $updates = [];
-            $updatedFields = [];
 
             foreach ($data as $field => $value) {
-                if (in_array($field, ['name', 'description', 'venue'], true)) {
-                    $value = trim($value);
-                }
-
                 if (in_array($field, ['date', 'endAt'], true)) {
-                    $updatedFields[$field] = $value;
                     $value = new Timestamp(new DateTimeImmutable($value));
-                } else {
-                    $updatedFields[$field] = $value;
                 }
 
                 $updates[] = [
@@ -297,7 +340,7 @@ class EventController extends Controller
                 ];
             }
 
-            // Registrar la fecha de modificación.
+            // Registrar la última modificación.
             $updates[] = [
                 'path' => 'updatedAt',
                 'value' => FieldValue::serverTimestamp(),
@@ -313,7 +356,7 @@ class EventController extends Controller
                         'sellerId' => $event['sellerId'] ?? null,
                         'status' => $event['status'] ?? null,
                     ],
-                    $updatedFields
+                    $data
                 ),
             ], 200);
 

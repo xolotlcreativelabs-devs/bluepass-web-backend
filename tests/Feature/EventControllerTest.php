@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use DateTimeImmutable;
+use Google\Cloud\Core\Timestamp;
 use Google\Cloud\Firestore\CollectionReference;
 use Google\Cloud\Firestore\DocumentReference;
 use Google\Cloud\Firestore\DocumentSnapshot;
@@ -59,7 +61,8 @@ class EventControllerTest extends TestCase
             ->assertJsonPath('event.id', 'evento-prueba')
             ->assertJsonPath('event.sellerId', 'firebase-uid-prueba')
             ->assertJsonPath('event.status', 'draft')
-            ->assertJsonPath('event.name', 'Concierto de prueba');
+            ->assertJsonPath('event.name', 'Concierto de prueba')
+            ->assertJsonPath('event.category', 'Música');
     }
 
     /**
@@ -88,6 +91,7 @@ class EventControllerTest extends TestCase
             ->assertJsonValidationErrors([
                 'name',
                 'description',
+                'category',
                 'venue',
                 'timezone',
             ]);
@@ -172,7 +176,7 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Impedir editar eventos de otro vendedor.
+     * Impedir editar eventos ajenos.
      */
     public function test_seller_cannot_update_another_sellers_event(): void
     {
@@ -190,7 +194,7 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Permitir al administrador editar eventos ajenos.
+     * Permitir editar eventos ajenos al administrador.
      */
     public function test_admin_can_update_another_sellers_event(): void
     {
@@ -206,7 +210,7 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Rechazar la edición de eventos inexistentes.
+     * Rechazar eventos inexistentes.
      */
     public function test_event_update_rejects_missing_event(): void
     {
@@ -224,20 +228,155 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Preparar los datos de un evento.
+     * Exigir una categoría.
+     */
+    public function test_event_requires_category(): void
+    {
+        $this->mockUser('seller');
+
+        $data = $this->eventData();
+        unset($data['category']);
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/events', $data)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['category']);
+    }
+
+    /**
+     * Rechazar categorías inválidas.
+     */
+    public function test_event_rejects_invalid_category(): void
+    {
+        $this->mockUser('seller');
+
+        $data = $this->eventData();
+        $data['category'] = 'A';
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/events', $data)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['category']);
+    }
+
+    /**
+     * Rechazar una finalización anterior al inicio.
+     */
+    public function test_event_rejects_end_before_start(): void
+    {
+        $this->mockUser('seller');
+
+        $data = $this->eventData();
+        $data['date'] = '2027-05-20T20:00:00-06:00';
+        $data['endAt'] = '2027-05-20T18:00:00-06:00';
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/events', $data)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['endAt']);
+    }
+
+    /**
+     * Aceptar fechas y horarios válidos.
+     */
+    public function test_event_accepts_valid_dates(): void
+    {
+        $this->mockUser('seller', 'create-dates');
+
+        $data = $this->eventData();
+        $data['date'] = '2027-05-20T20:00:00-06:00';
+        $data['endAt'] = '2027-05-20T23:00:00-06:00';
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/events', $data)
+            ->assertStatus(201)
+            ->assertJsonPath('event.date', $data['date'])
+            ->assertJsonPath('event.endAt', $data['endAt']);
+    }
+
+    /**
+     * Rechazar formatos incorrectos de fecha.
+     */
+    public function test_event_rejects_invalid_date_format(): void
+    {
+        $this->mockUser('seller');
+
+        $data = $this->eventData();
+        $data['date'] = '20/05/2027 20:00';
+        $data['endAt'] = '2027-05-20T23:00:00-06:00';
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/events', $data)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['date']);
+    }
+
+    /**
+     * Rechazar inicio y finalización iguales.
+     */
+    public function test_event_rejects_equal_start_and_end(): void
+    {
+        $this->mockUser('seller');
+
+        $data = $this->eventData();
+        $data['date'] = '2027-05-20T20:00:00-06:00';
+        $data['endAt'] = '2027-05-20T20:00:00-06:00';
+
+        $this->withToken('token-ficticio')
+            ->postJson('/api/events', $data)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['endAt']);
+    }
+
+    /**
+     * Rechazar una finalización inválida al editar.
+     */
+    public function test_event_update_rejects_end_before_existing_start(): void
+    {
+        $this->mockUser('seller', 'update-invalid-end');
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba', [
+                'endAt' => '2027-05-20T18:00:00-06:00',
+            ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['endAt']);
+    }
+
+    /**
+     * Permitir modificar una fecha si conserva el orden.
+     */
+    public function test_event_update_accepts_valid_partial_date(): void
+    {
+        $this->mockUser('seller', 'update-valid-date');
+
+        $this->withToken('token-ficticio')
+            ->patchJson('/api/events/evento-prueba', [
+                'date' => '2027-05-20T19:00:00-06:00',
+            ])
+            ->assertStatus(200)
+            ->assertJsonPath(
+                'event.date',
+                '2027-05-20T19:00:00-06:00'
+            );
+    }
+
+    /**
+     * Preparar los datos de prueba.
      */
     private function eventData(): array
     {
         return [
             'name' => 'Concierto de prueba',
             'description' => 'Evento musical de prueba para BluePass.',
+            'category' => 'Música',
             'venue' => 'Auditorio de prueba',
             'timezone' => 'America/Mexico_City',
         ];
     }
 
     /**
-     * Simular servicios sin autenticación.
+     * Simular servicios que no deben utilizarse.
      */
     private function mockUnusedServices(): void
     {
@@ -252,7 +391,7 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Simular el usuario y sus permisos.
+     * Simular un usuario de Firebase.
      */
     private function mockUser(
         string $role,
@@ -328,8 +467,12 @@ class EventControllerTest extends TestCase
             ->with('users')
             ->andReturn($users);
 
-        if ($action === 'create') {
-            $this->mockEventCreation($firestore, $uid);
+        if (in_array($action, ['create', 'create-dates'], true)) {
+            $this->mockEventCreation(
+                $firestore,
+                $uid,
+                $action === 'create-dates'
+            );
         } elseif (str_starts_with($action, 'update-')) {
             $this->mockEventUpdate($firestore, $uid, $action);
         } else {
@@ -341,23 +484,38 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Simular la creación de un evento.
+     * Simular el registro en Firestore.
      */
     private function mockEventCreation(
         $firestore,
-        string $uid
+        string $uid,
+        bool $withDates
     ): void {
         $document = Mockery::mock(DocumentReference::class);
 
         $document->shouldReceive('set')
             ->once()
-            ->with(Mockery::on(function ($data) use ($uid) {
-                return is_array($data)
-                    && ($data['sellerId'] ?? null) === $uid
-                    && ($data['status'] ?? null) === 'draft'
-                    && ($data['name'] ?? null) === 'Concierto de prueba'
-                    && isset($data['createdAt'])
-                    && isset($data['updatedAt']);
+            ->with(Mockery::on(function ($data) use ($uid, $withDates) {
+                if (
+                    !is_array($data) ||
+                    ($data['sellerId'] ?? null) !== $uid ||
+                    ($data['status'] ?? null) !== 'draft' ||
+                    ($data['name'] ?? null) !== 'Concierto de prueba' ||
+                    ($data['category'] ?? null) !== 'Música' ||
+                    !isset($data['createdAt']) ||
+                    !isset($data['updatedAt'])
+                ) {
+                    return false;
+                }
+
+                if ($withDates) {
+                    return ($data['date'] ?? null) instanceof Timestamp
+                        && ($data['endAt'] ?? null) instanceof Timestamp
+                        && $data['endAt']->get() > $data['date']->get();
+                }
+
+                return ($data['date'] ?? null) === null
+                    && ($data['endAt'] ?? null) === null;
             }))
             ->andReturn([]);
 
@@ -378,7 +536,7 @@ class EventControllerTest extends TestCase
     }
 
     /**
-     * Simular la consulta y edición de eventos.
+     * Simular la consulta y actualización de eventos.
      */
     private function mockEventUpdate(
         $firestore,
@@ -386,6 +544,7 @@ class EventControllerTest extends TestCase
         string $action
     ): void {
         $missing = $action === 'update-missing';
+
         $otherSeller = in_array(
             $action,
             ['update-other', 'update-admin'],
@@ -394,27 +553,45 @@ class EventControllerTest extends TestCase
 
         $sellerId = $otherSeller ? 'otro-vendedor' : $uid;
 
+        $start = null;
+        $end = null;
+
+        if (in_array(
+            $action,
+            ['update-invalid-end', 'update-valid-date'],
+            true
+        )) {
+            $start = new Timestamp(
+                new DateTimeImmutable('2027-05-20T20:00:00-06:00')
+            );
+
+            $end = new Timestamp(
+                new DateTimeImmutable('2027-05-20T23:00:00-06:00')
+            );
+        }
+
         $snapshot = Mockery::mock(DocumentSnapshot::class);
 
         $snapshot->shouldReceive('exists')
             ->once()
             ->andReturn(!$missing);
 
-        if (!$missing) {
+        if ($missing) {
+            $snapshot->shouldNotReceive('data');
+        } else {
             $snapshot->shouldReceive('data')
                 ->once()
                 ->andReturn([
                     'sellerId' => $sellerId,
                     'name' => 'Concierto de prueba',
                     'description' => 'Evento musical de prueba.',
+                    'category' => 'Música',
                     'venue' => 'Auditorio de prueba',
                     'timezone' => 'America/Mexico_City',
-                    'date' => null,
-                    'endAt' => null,
+                    'date' => $start,
+                    'endAt' => $end,
                     'status' => 'draft',
                 ]);
-        } else {
-            $snapshot->shouldNotReceive('data');
         }
 
         $document = Mockery::mock(DocumentReference::class);
@@ -425,20 +602,34 @@ class EventControllerTest extends TestCase
 
         if (in_array(
             $action,
-            ['update-own', 'update-admin'],
+            ['update-own', 'update-admin', 'update-valid-date'],
             true
         )) {
             $document->shouldReceive('update')
                 ->once()
-                ->with(Mockery::on(function ($updates) {
+                ->with(Mockery::on(function ($updates) use ($action) {
                     if (!is_array($updates) || count($updates) !== 2) {
                         return false;
                     }
 
+                    if (
+                        $updates[1]['path'] !== 'updatedAt' ||
+                        !isset($updates[1]['value'])
+                    ) {
+                        return false;
+                    }
+
+                    if ($action === 'update-valid-date') {
+                        return $updates[0]['path'] === 'date'
+                            && $updates[0]['value'] instanceof Timestamp
+                            && $updates[0]['value']->get() ==
+                                new DateTimeImmutable(
+                                    '2027-05-20T19:00:00-06:00'
+                                );
+                    }
+
                     return $updates[0]['path'] === 'name'
-                        && $updates[0]['value'] === 'Evento actualizado'
-                        && $updates[1]['path'] === 'updatedAt'
-                        && isset($updates[1]['value']);
+                        && $updates[0]['value'] === 'Evento actualizado';
                 }))
                 ->andReturn([]);
         } else {
