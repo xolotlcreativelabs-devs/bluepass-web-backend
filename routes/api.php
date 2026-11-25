@@ -11,6 +11,8 @@ use App\Http\Controllers\Api\EventTicketTypeController;
 use App\Http\Controllers\Api\FavoriteController;
 use App\Http\Controllers\Api\NewsController;
 use App\Http\Controllers\Api\NewsStatusController;
+use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\Api\OrderQueryController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\RegisterCustomerController;
 use App\Http\Controllers\Api\TicketReservationController;
@@ -20,18 +22,25 @@ use Illuminate\Support\Facades\Route;
 
 // Rutas de autenticacion.
 Route::middleware('throttle:bluepass-auth')->group(function () {
+    Route::post(
+        '/auth/register',
+        [RegisterCustomerController::class, 'store']
+    );
 
-    // Registrar compradores.
-    Route::post('/auth/register', [RegisterCustomerController::class, 'store']);
+    Route::post(
+        '/auth/session',
+        [AuthController::class, 'session']
+    );
 
-    // Validar el inicio de sesion.
-    Route::post('/auth/session', [AuthController::class, 'session']);
+    Route::post(
+        '/auth/logout',
+        [AuthController::class, 'logout']
+    );
 
-    // Revocar sesiones del usuario.
-    Route::post('/auth/logout', [AuthController::class, 'logout']);
-
-    // Solicitar recuperacion de contrasena.
-    Route::post('/auth/password-reset', [PasswordResetController::class, 'store']);
+    Route::post(
+        '/auth/password-reset',
+        [PasswordResetController::class, 'store']
+    );
 });
 
 // Rutas protegidas del usuario autenticado.
@@ -39,26 +48,26 @@ Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth',
 ])->group(function () {
+    Route::get(
+        '/users/me',
+        [UserProfileController::class, 'show']
+    );
 
-    // Consultar el perfil propio.
-    Route::get('/users/me', [UserProfileController::class, 'show']);
+    Route::patch(
+        '/users/me',
+        [UserProfileController::class, 'update']
+    );
 
-    // Actualizar el nombre del perfil.
-    Route::patch('/users/me', [UserProfileController::class, 'update']);
-
-    // Consultar favoritos propios.
     Route::get(
         '/users/me/favorites',
         [FavoriteController::class, 'index']
     );
 
-    // Agregar un evento a favoritos.
     Route::post(
         '/users/me/favorites/{eventId}',
         [FavoriteController::class, 'store']
     );
 
-    // Quitar un evento de favoritos.
     Route::delete(
         '/users/me/favorites/{eventId}',
         [FavoriteController::class, 'destroy']
@@ -67,102 +76,120 @@ Route::middleware([
 
 // Rutas publicas del catalogo de eventos.
 Route::middleware('throttle:bluepass-api')->group(function () {
+    Route::get(
+        '/events',
+        [EventCatalogController::class, 'index']
+    );
 
-    // Consultar eventos publicados.
-    Route::get('/events', [EventCatalogController::class, 'index']);
+    Route::get(
+        '/events/{id}',
+        [EventCatalogController::class, 'show']
+    );
 
-    // Consultar el detalle de un evento publicado.
-    Route::get('/events/{id}', [EventCatalogController::class, 'show']);
-
-    // Consultar tipos de boletos activos.
     Route::get(
         '/events/{id}/ticket-types',
         [EventTicketTypeController::class, 'index']
     );
 
-    // Consultar disponibilidad de boletos.
     Route::get(
         '/events/{id}/availability',
         [EventAvailabilityController::class, 'index']
     );
 });
 
-// Rutas protegidas de eventos.
+// Rutas protegidas de administracion de eventos.
 Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth:seller,admin',
 ])->group(function () {
+    Route::post(
+        '/events',
+        [EventController::class, 'store']
+    );
 
-    // Registrar eventos como borradores.
-    Route::post('/events', [EventController::class, 'store']);
+    Route::patch(
+        '/events/{id}',
+        [EventController::class, 'update']
+    );
 
-    // Editar eventos existentes.
-    Route::patch('/events/{id}', [EventController::class, 'update']);
+    Route::patch(
+        '/events/{id}/status',
+        [EventStatusController::class, 'update']
+    );
 
-    // Publicar o despublicar un evento.
-    Route::patch('/events/{id}/status', [EventStatusController::class, 'update']);
-
-    // Crear tipos de boletos para un evento.
     Route::post(
         '/events/{id}/ticket-types',
         [EventTicketManagementController::class, 'store']
     );
 
-    // Consultar imagenes de un evento.
-    Route::get('/events/{id}/images', [EventImageController::class, 'index']);
+    Route::get(
+        '/events/{id}/images',
+        [EventImageController::class, 'index']
+    );
 
-    // Subir o reemplazar la portada.
     Route::post(
         '/events/{id}/images/cover',
         [EventImageController::class, 'uploadCover']
     );
 
-    // Agregar imagenes a la galeria.
     Route::post(
         '/events/{id}/images/gallery',
         [EventImageController::class, 'uploadGallery']
     );
 
-    // Consultar o descargar imagenes.
     Route::get(
         '/events/{id}/images/{imageId}',
         [EventImageController::class, 'show']
     );
 
-    // Eliminar imagenes.
     Route::delete(
         '/events/{id}/images/{imageId}',
         [EventImageController::class, 'destroy']
     );
 });
 
-// Rutas protegidas de reservas.
+// Rutas protegidas de reservas y pedidos.
 Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth:customer',
 ])->group(function () {
-
-    // Crear una reserva temporal de boletos.
     Route::post(
         '/events/{eventId}/reservations',
         [TicketReservationController::class, 'store']
     );
 
-    // Cancelar una reserva y liberar sus boletos.
     Route::delete(
         '/events/{eventId}/reservations/{reservationId}',
         [TicketReservationReleaseController::class, 'destroy']
+    );
+
+    Route::post(
+        '/events/{eventId}/orders',
+        [OrderController::class, 'store']
+    );
+
+    Route::get(
+        '/orders',
+        [OrderQueryController::class, 'index']
+    );
+
+    Route::get(
+        '/orders/{orderId}',
+        [OrderQueryController::class, 'show']
     );
 });
 
 // Rutas publicas de noticias.
 Route::middleware('throttle:bluepass-api')->group(function () {
+    Route::get(
+        '/news',
+        [NewsController::class, 'index']
+    );
 
-    // Consultar noticias publicadas.
-    Route::get('/news', [NewsController::class, 'index']);
-
-    // Consultar el detalle de una noticia publicada.
-    Route::get('/news/{id}', [NewsController::class, 'show']);
+    Route::get(
+        '/news/{id}',
+        [NewsController::class, 'show']
+    );
 });
 
 // Rutas de noticias exclusivas del administrador.
@@ -170,14 +197,16 @@ Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth:admin',
 ])->group(function () {
+    Route::post(
+        '/news',
+        [NewsController::class, 'store']
+    );
 
-    // Registrar noticias como borradores.
-    Route::post('/news', [NewsController::class, 'store']);
+    Route::patch(
+        '/news/{id}',
+        [NewsController::class, 'update']
+    );
 
-    // Editar noticias existentes.
-    Route::patch('/news/{id}', [NewsController::class, 'update']);
-
-    // Publicar o despublicar una noticia.
     Route::patch(
         '/news/{id}/status',
         [NewsStatusController::class, 'update']

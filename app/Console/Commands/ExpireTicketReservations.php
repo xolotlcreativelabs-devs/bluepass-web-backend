@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
+use Google\Cloud\Firestore\DocumentReference;
 use Google\Cloud\Firestore\FirestoreClient;
 use Google\Cloud\Firestore\Transaction;
 use Illuminate\Console\Command;
@@ -60,22 +61,22 @@ class ExpireTicketReservations extends Command
                     } else {
                         $skipped++;
                     }
-                } catch (Throwable $e) {
+                } catch (Throwable $exception) {
                     $failed++;
 
                     Log::error(
                         'Error al liberar una reserva vencida BluePass',
                         [
-                            'exception' => get_class($e),
+                            'exception' => get_class($exception),
                         ]
                     );
                 }
             }
-        } catch (Throwable $e) {
+        } catch (Throwable $exception) {
             Log::error(
                 'Error al consultar reservas vencidas BluePass',
                 [
-                    'exception' => get_class($e),
+                    'exception' => get_class($exception),
                 ]
             );
 
@@ -86,7 +87,7 @@ class ExpireTicketReservations extends Command
             return self::FAILURE;
         }
 
-        $this->info('Revisión de reservas finalizada.');
+        $this->info('Revision de reservas finalizada.');
         $this->line('Reservas liberadas: ' . $released);
         $this->line('Reservas omitidas: ' . $skipped);
         $this->line('Reservas con errores: ' . $failed);
@@ -99,18 +100,18 @@ class ExpireTicketReservations extends Command
     }
 
     /**
-     * Liberar una reserva mediante una transaccion.
+     * Liberar una reserva y vencer su pedido asociado.
      */
     private function releaseReservation(
         FirestoreClient $firestore,
-        $reservationDocument
+        DocumentReference $reservationDocument
     ): string {
         return $firestore->runTransaction(
             function (Transaction $transaction) use (
                 $firestore,
                 $reservationDocument
             ): string {
-                // Leer nuevamente la reserva dentro de la transaccion.
+                // Consultar la reserva dentro de la transaccion.
                 $reservationSnapshot = $transaction->snapshot(
                     $reservationDocument
                 );
@@ -127,7 +128,7 @@ class ExpireTicketReservations extends Command
                     );
                 }
 
-                // Una reserva cancelada o liberada no se procesa.
+                // No procesar reservas ya cerradas.
                 if (($reservation['status'] ?? null) !== 'active') {
                     return 'skipped';
                 }
@@ -144,7 +145,7 @@ class ExpireTicketReservations extends Command
                     );
                 }
 
-                // Verificar nuevamente que realmente haya vencido.
+                // Revisar el vencimiento nuevamente.
                 if ($now < $expiresAt) {
                     return 'skipped';
                 }
@@ -152,6 +153,8 @@ class ExpireTicketReservations extends Command
                 $eventId = $reservation['eventId'] ?? null;
                 $ticketTypeId = $reservation['ticketTypeId'] ?? null;
                 $quantity = $reservation['quantity'] ?? null;
+                $userId = $reservation['userId'] ?? null;
+                $orderId = $reservation['orderId'] ?? null;
 
                 if (
                     !$this->validId($eventId) ||
@@ -208,7 +211,62 @@ class ExpireTicketReservations extends Command
                     );
                 }
 
-                // Actualizar inventario y reserva de forma atomica.
+                // Comprobar si existe un pedido relacionado.
+                $orderDocument = null;
+
+                if ($orderId !== null) {
+                    if (
+                        !$this->validId($orderId) ||
+                        !is_string($userId) ||
+                        $userId === ''
+                    ) {
+                        throw new RuntimeException(
+                            'La relacion entre pedido y reserva es invalida.'
+                        );
+                    }
+
+                    $orderDocument = $firestore
+                        ->collection('orders')
+                        ->document($orderId);
+
+                    $orderSnapshot = $transaction->snapshot(
+                        $orderDocument
+                    );
+
+                    if (!$orderSnapshot->exists()) {
+                        throw new RuntimeException(
+                            'No se encontro el pedido asociado.'
+                        );
+                    }
+
+                    $order = $orderSnapshot->data();
+
+                    if (
+                        !is_array($order) ||
+                        ($order['userId'] ?? null) !== $userId ||
+                        ($order['eventId'] ?? null) !== $eventId ||
+                        ($order['ticketTypeId'] ?? null) !== $ticketTypeId ||
+                        ($order['quantity'] ?? null) !== $quantity ||
+                        ($order['reservationId'] ?? null) !==
+                            $reservationDocument->id()
+                    ) {
+                        throw new RuntimeException(
+                            'El pedido no coincide con la reserva.'
+                        );
+                    }
+
+                    // No liberar boletos vinculados a pedidos pagados
+                    // o con un estado diferente de pendiente.
+                    if (($order['status'] ?? null) !== 'pending') {
+                        throw new RuntimeException(
+                            'El pedido asociado no esta pendiente.'
+                        );
+                    }
+                }
+
+                $timestamp = new Timestamp($now);
+
+                // Actualizar el inventario una sola vez.
                 $transaction->update($ticketDocument, [
                     [
                         'path' => 'reserved',
@@ -216,10 +274,11 @@ class ExpireTicketReservations extends Command
                     ],
                     [
                         'path' => 'updatedAt',
-                        'value' => new Timestamp($now),
+                        'value' => $timestamp,
                     ],
                 ]);
 
+                // Marcar la reserva como vencida.
                 $transaction->update($reservationDocument, [
                     [
                         'path' => 'status',
@@ -227,9 +286,23 @@ class ExpireTicketReservations extends Command
                     ],
                     [
                         'path' => 'updatedAt',
-                        'value' => new Timestamp($now),
+                        'value' => $timestamp,
                     ],
                 ]);
+
+                // Vencer tambien el pedido dentro de la transaccion.
+                if ($orderDocument !== null) {
+                    $transaction->update($orderDocument, [
+                        [
+                            'path' => 'status',
+                            'value' => 'expired',
+                        ],
+                        [
+                            'path' => 'updatedAt',
+                            'value' => $timestamp,
+                        ],
+                    ]);
+                }
 
                 return 'released';
             }
