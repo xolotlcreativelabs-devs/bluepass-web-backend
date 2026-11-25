@@ -6,12 +6,15 @@ use App\Http\Controllers\Api\EventCatalogController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\EventImageController;
 use App\Http\Controllers\Api\EventStatusController;
+use App\Http\Controllers\Api\EventTicketManagementController;
 use App\Http\Controllers\Api\EventTicketTypeController;
 use App\Http\Controllers\Api\FavoriteController;
 use App\Http\Controllers\Api\NewsController;
 use App\Http\Controllers\Api\NewsStatusController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\RegisterCustomerController;
+use App\Http\Controllers\Api\TicketReservationController;
+use App\Http\Controllers\Api\TicketReservationReleaseController;
 use App\Http\Controllers\Api\UserProfileController;
 use Illuminate\Support\Facades\Route;
 
@@ -99,6 +102,12 @@ Route::middleware([
     // Publicar o despublicar un evento.
     Route::patch('/events/{id}/status', [EventStatusController::class, 'update']);
 
+    // Crear tipos de boletos para un evento.
+    Route::post(
+        '/events/{id}/ticket-types',
+        [EventTicketManagementController::class, 'store']
+    );
+
     // Consultar imagenes de un evento.
     Route::get('/events/{id}/images', [EventImageController::class, 'index']);
 
@@ -124,6 +133,25 @@ Route::middleware([
     Route::delete(
         '/events/{id}/images/{imageId}',
         [EventImageController::class, 'destroy']
+    );
+});
+
+// Rutas protegidas de reservas.
+Route::middleware([
+    'throttle:bluepass-api',
+    'firebase.auth:customer',
+])->group(function () {
+
+    // Crear una reserva temporal de boletos.
+    Route::post(
+        '/events/{eventId}/reservations',
+        [TicketReservationController::class, 'store']
+    );
+
+    // Cancelar una reserva y liberar sus boletos.
+    Route::delete(
+        '/events/{eventId}/reservations/{reservationId}',
+        [TicketReservationReleaseController::class, 'destroy']
     );
 });
 
