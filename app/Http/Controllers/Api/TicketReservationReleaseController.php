@@ -30,7 +30,7 @@ class TicketReservationReleaseController extends Controller
 
         if (!is_string($uid) || $uid === '') {
             return response()->json([
-                'message' => 'Debes iniciar sesión.',
+                'message' => 'Debes iniciar sesion.',
             ], 401);
         }
 
@@ -41,7 +41,7 @@ class TicketReservationReleaseController extends Controller
         }
 
         foreach ([$eventId, $reservationId] as $id) {
-            if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id)) {
+            if (!$this->validId($id)) {
                 return response()->json([
                     'message' => 'La reserva no existe.',
                 ], 404);
@@ -59,6 +59,7 @@ class TicketReservationReleaseController extends Controller
 
             $result = $firestore->runTransaction(
                 function (Transaction $transaction) use (
+                    $firestore,
                     $eventDocument,
                     $reservationDocument,
                     $reservationId,
@@ -83,7 +84,6 @@ class TicketReservationReleaseController extends Controller
                         );
                     }
 
-                    // Solo el comprador propietario puede cancelar.
                     if (($reservation['userId'] ?? null) !== $uid) {
                         return [
                             'code' => 404,
@@ -93,7 +93,7 @@ class TicketReservationReleaseController extends Controller
 
                     $status = $reservation['status'] ?? null;
 
-                    // No liberar inventario dos veces.
+                    // No liberar el inventario dos veces.
                     if (in_array(
                         $status,
                         ['cancelled', 'expired'],
@@ -119,11 +119,7 @@ class TicketReservationReleaseController extends Controller
                     $quantity = $reservation['quantity'] ?? null;
 
                     if (
-                        !is_string($ticketTypeId) ||
-                        !preg_match(
-                            '/^[A-Za-z0-9_-]{1,128}$/D',
-                            $ticketTypeId
-                        ) ||
+                        !$this->validId($ticketTypeId) ||
                         !is_int($quantity) ||
                         $quantity < 1
                     ) {
@@ -132,7 +128,6 @@ class TicketReservationReleaseController extends Controller
                         );
                     }
 
-                    // Leer el inventario dentro de la transaccion.
                     $ticketDocument = $eventDocument
                         ->collection('ticketTypes')
                         ->document($ticketTypeId);
@@ -174,6 +169,55 @@ class TicketReservationReleaseController extends Controller
                         );
                     }
 
+                    // Consultar el pedido antes de modificar documentos.
+                    $orderDocument = null;
+                    $orderId = $reservation['orderId'] ?? null;
+
+                    if ($orderId !== null) {
+                        if (!$this->validId($orderId)) {
+                            throw new RuntimeException(
+                                'El identificador del pedido es invalido.'
+                            );
+                        }
+
+                        $orderDocument = $firestore
+                            ->collection('orders')
+                            ->document($orderId);
+
+                        $orderSnapshot = $transaction->snapshot(
+                            $orderDocument
+                        );
+
+                        if (!$orderSnapshot->exists()) {
+                            throw new RuntimeException(
+                                'No se encontro el pedido de la reserva.'
+                            );
+                        }
+
+                        $order = $orderSnapshot->data();
+
+                        if (
+                            !is_array($order) ||
+                            ($order['userId'] ?? null) !== $uid ||
+                            ($order['eventId'] ?? null) !==
+                                ($reservation['eventId'] ?? null) ||
+                            ($order['reservationId'] ?? null) !== $reservationId
+                        ) {
+                            throw new RuntimeException(
+                                'El pedido no coincide con la reserva.'
+                            );
+                        }
+
+                        // No liberar una reserva asociada a un
+                        // pedido que ya dejo de estar pendiente.
+                        if (($order['status'] ?? null) !== 'pending') {
+                            return [
+                                'code' => 409,
+                                'message' => 'El pedido ya no permite cancelar su reserva.',
+                            ];
+                        }
+                    }
+
                     $expiresAt = $this->readTimestamp(
                         $reservation['expiresAt'] ?? null
                     );
@@ -185,12 +229,13 @@ class TicketReservationReleaseController extends Controller
                     }
 
                     $now = new DateTimeImmutable();
+                    $timestamp = new Timestamp($now);
 
                     $newStatus = $now >= $expiresAt
                         ? 'expired'
                         : 'cancelled';
 
-                    // Liberar el inventario y cerrar la reserva.
+                    // Actualizar el inventario solo una vez.
                     $transaction->update($ticketDocument, [
                         [
                             'path' => 'reserved',
@@ -198,10 +243,11 @@ class TicketReservationReleaseController extends Controller
                         ],
                         [
                             'path' => 'updatedAt',
-                            'value' => new Timestamp($now),
+                            'value' => $timestamp,
                         ],
                     ]);
 
+                    // Cerrar la reserva.
                     $transaction->update($reservationDocument, [
                         [
                             'path' => 'status',
@@ -209,9 +255,23 @@ class TicketReservationReleaseController extends Controller
                         ],
                         [
                             'path' => 'updatedAt',
-                            'value' => new Timestamp($now),
+                            'value' => $timestamp,
                         ],
                     ]);
+
+                    // Cerrar tambien el pedido asociado.
+                    if ($orderDocument !== null) {
+                        $transaction->update($orderDocument, [
+                            [
+                                'path' => 'status',
+                                'value' => $newStatus,
+                            ],
+                            [
+                                'path' => 'updatedAt',
+                                'value' => $timestamp,
+                            ],
+                        ]);
+                    }
 
                     return [
                         'code' => 200,
@@ -219,6 +279,7 @@ class TicketReservationReleaseController extends Controller
                         'reservationId' => $reservationId,
                         'released' => true,
                         'status' => $newStatus,
+                        'orderId' => $orderId,
                         'inventory' => [
                             'capacity' => $capacity,
                             'sold' => $sold,
@@ -235,15 +296,24 @@ class TicketReservationReleaseController extends Controller
             unset($result['code']);
 
             return response()->json($result, $statusCode);
-        } catch (Throwable $e) {
+        } catch (Throwable $exception) {
             Log::error('Error al liberar reserva BluePass', [
-                'exception' => get_class($e),
+                'exception' => get_class($exception),
             ]);
 
             return response()->json([
                 'message' => 'No fue posible liberar la reserva.',
             ], 500);
         }
+    }
+
+    /**
+     * Validar identificadores de documentos.
+     */
+    private function validId(mixed $id): bool
+    {
+        return is_string($id) &&
+            preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) === 1;
     }
 
     /**
