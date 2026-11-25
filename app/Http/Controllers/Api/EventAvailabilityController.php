@@ -77,26 +77,40 @@ class EventAvailabilityController extends Controller
                     continue;
                 }
 
-                // Obtener las cantidades registradas.
+                // Leer el inventario del tipo de boleto.
                 $capacity = $data['capacity'] ?? null;
                 $sold = $data['sold'] ?? null;
 
-                // Verificar que las cantidades sean validas.
+                // Los boletos anteriores no tienen reserved.
+                $reserved = $data['reserved'] ?? 0;
+
+                // Comprobar que los contadores sean validos.
                 if (
                     !is_int($capacity) ||
                     !is_int($sold) ||
+                    !is_int($reserved) ||
                     $capacity < 0 ||
-                    $sold < 0
+                    $sold < 0 ||
+                    $reserved < 0
                 ) {
                     throw new RuntimeException(
-                        'Cantidades de boletos invalidas.'
+                        'Los contadores del inventario son invalidos.'
                     );
                 }
 
-                // Evitar disponibilidades negativas.
-                $available = max(0, $capacity - $sold);
+                // Detectar inventarios inconsistentes.
+                if (
+                    $sold > $capacity ||
+                    $reserved > ($capacity - $sold)
+                ) {
+                    throw new RuntimeException(
+                        'El inventario supera la capacidad del boleto.'
+                    );
+                }
 
-                // Determinar si hay boletos disponibles.
+                // Restar vendidos y reservados del inventario total.
+                $available = $capacity - $sold - $reserved;
+
                 $isAvailable = $available > 0;
 
                 $availability[] = [
@@ -104,6 +118,7 @@ class EventAvailabilityController extends Controller
                     'name' => $data['name'] ?? null,
                     'capacity' => $capacity,
                     'sold' => $sold,
+                    'reserved' => $reserved,
                     'available' => $available,
                     'isAvailable' => $isAvailable,
                     'status' => $isAvailable

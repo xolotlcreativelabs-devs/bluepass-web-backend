@@ -35,6 +35,7 @@ class EventAvailabilityTest extends TestCase
             ->assertJsonPath('ticketTypes.0.ticketTypeId', 'general')
             ->assertJsonPath('ticketTypes.0.capacity', 150)
             ->assertJsonPath('ticketTypes.0.sold', 20)
+            ->assertJsonPath('ticketTypes.0.reserved', 0)
             ->assertJsonPath('ticketTypes.0.available', 130)
             ->assertJsonPath('ticketTypes.0.isAvailable', true)
             ->assertJsonPath('ticketTypes.0.status', 'available')
@@ -44,7 +45,31 @@ class EventAvailabilityTest extends TestCase
     }
 
     /**
-     * Identificar boletos agotados.
+     * Restar las entradas reservadas del inventario.
+     */
+    public function test_subtracts_reserved_tickets(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                25,
+                10
+            ),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(200)
+            ->assertJsonPath('ticketTypes.0.capacity', 100)
+            ->assertJsonPath('ticketTypes.0.sold', 25)
+            ->assertJsonPath('ticketTypes.0.reserved', 10)
+            ->assertJsonPath('ticketTypes.0.available', 65)
+            ->assertJsonPath('ticketTypes.0.isAvailable', true);
+    }
+
+    /**
+     * Identificar boletos agotados por ventas.
      */
     public function test_sold_out_ticket_has_zero_availability(): void
     {
@@ -56,9 +81,55 @@ class EventAvailabilityTest extends TestCase
             ->assertStatus(200)
             ->assertJsonPath('ticketTypes.0.capacity', 30)
             ->assertJsonPath('ticketTypes.0.sold', 30)
+            ->assertJsonPath('ticketTypes.0.reserved', 0)
             ->assertJsonPath('ticketTypes.0.available', 0)
             ->assertJsonPath('ticketTypes.0.isAvailable', false)
             ->assertJsonPath('ticketTypes.0.status', 'sold_out');
+    }
+
+    /**
+     * Identificar boletos agotados por reservas.
+     */
+    public function test_reserved_tickets_can_exhaust_inventory(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                60,
+                40
+            ),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(200)
+            ->assertJsonPath('ticketTypes.0.sold', 60)
+            ->assertJsonPath('ticketTypes.0.reserved', 40)
+            ->assertJsonPath('ticketTypes.0.available', 0)
+            ->assertJsonPath('ticketTypes.0.isAvailable', false)
+            ->assertJsonPath('ticketTypes.0.status', 'sold_out');
+    }
+
+    /**
+     * Mantener compatibilidad con boletos anteriores.
+     */
+    public function test_old_ticket_without_reserved_field(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                20,
+                null
+            ),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(200)
+            ->assertJsonPath('ticketTypes.0.reserved', 0)
+            ->assertJsonPath('ticketTypes.0.available', 80);
     }
 
     /**
@@ -95,7 +166,7 @@ class EventAvailabilityTest extends TestCase
     }
 
     /**
-     * Impedir consultar disponibilidad de eventos en borrador.
+     * Impedir consultar eventos en borrador.
      */
     public function test_draft_event_returns_404(): void
     {
@@ -110,7 +181,7 @@ class EventAvailabilityTest extends TestCase
     }
 
     /**
-     * Responder 404 cuando el evento no existe.
+     * Responder cuando el evento no existe.
      */
     public function test_nonexistent_event_returns_404(): void
     {
@@ -144,12 +215,103 @@ class EventAvailabilityTest extends TestCase
     }
 
     /**
-     * Detectar cantidades incorrectas de boletos.
+     * Detectar cantidades negativas.
      */
     public function test_rejects_invalid_ticket_quantities(): void
     {
         $this->mockAvailability('published', [
             $this->ticketSnapshot('general', 'active', -10, 5),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(500)
+            ->assertJsonPath(
+                'message',
+                'No fue posible consultar la disponibilidad.'
+            );
+    }
+
+    /**
+     * Detectar reservas negativas.
+     */
+    public function test_rejects_negative_reserved_tickets(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                20,
+                -5
+            ),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(500)
+            ->assertJsonPath(
+                'message',
+                'No fue posible consultar la disponibilidad.'
+            );
+    }
+
+    /**
+     * Detectar cuando las ventas superan la capacidad.
+     */
+    public function test_rejects_sold_above_capacity(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                110
+            ),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(500)
+            ->assertJsonPath(
+                'message',
+                'No fue posible consultar la disponibilidad.'
+            );
+    }
+
+    /**
+     * Detectar ventas y reservas superiores a la capacidad.
+     */
+    public function test_rejects_oversold_inventory(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                75,
+                30
+            ),
+        ]);
+
+        $this->getJson('/api/events/evento-prueba/availability')
+            ->assertStatus(500)
+            ->assertJsonPath(
+                'message',
+                'No fue posible consultar la disponibilidad.'
+            );
+    }
+
+    /**
+     * Detectar un contador de reservas invalido.
+     */
+    public function test_rejects_non_integer_reserved_tickets(): void
+    {
+        $this->mockAvailability('published', [
+            $this->ticketSnapshot(
+                'general',
+                'active',
+                100,
+                20,
+                'diez'
+            ),
         ]);
 
         $this->getJson('/api/events/evento-prueba/availability')
@@ -309,21 +471,28 @@ class EventAvailabilityTest extends TestCase
         string $id,
         string $status,
         int $capacity,
-        int $sold
+        int $sold,
+        mixed $reserved = null
     ): DocumentSnapshot {
         $snapshot = Mockery::mock(DocumentSnapshot::class);
+
+        $data = [
+            'sellerId' => 'vendedor-privado',
+            'name' => $id === 'vip' ? 'VIP' : 'General',
+            'capacity' => $capacity,
+            'sold' => $sold,
+            'status' => $status,
+        ];
+
+        if ($reserved !== null) {
+            $data['reserved'] = $reserved;
+        }
 
         $snapshot->shouldReceive('exists')
             ->andReturn(true);
 
         $snapshot->shouldReceive('data')
-            ->andReturn([
-                'sellerId' => 'vendedor-privado',
-                'name' => $id === 'vip' ? 'VIP' : 'General',
-                'capacity' => $capacity,
-                'sold' => $sold,
-                'status' => $status,
-            ]);
+            ->andReturn($data);
 
         $snapshot->shouldReceive('id')
             ->andReturn($id);
