@@ -62,6 +62,15 @@ class MultiTicketIssuanceIntegrationTest extends TestCase
 
         $this->eventId = 'test-multi-issue-' . $suffix;
         $this->userId = 'buyer-multi-' . $suffix;
+
+        $this->firestore
+            ->collection('users')
+            ->document($this->userId)
+            ->set([
+                'authSubject' => $this->userId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
         $this->paymentReference = 'test-payment-' . $suffix;
 
         $this->eventDocument = $this->firestore
@@ -589,6 +598,12 @@ class MultiTicketIssuanceIntegrationTest extends TestCase
                 $this->eventDocument->delete();
             }
         } finally {
+            if (isset($this->firestore, $this->userId)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document($this->userId)
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

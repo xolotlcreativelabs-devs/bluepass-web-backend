@@ -52,6 +52,15 @@ class MultiTicketPurchaseFlowIntegrationTest extends TestCase
             'transport' => 'rest',
         ]);
 
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-prueba')
+            ->set([
+                'authSubject' => 'comprador-prueba',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $suffix = bin2hex(random_bytes(8));
 
         $this->eventId = 'test-purchase-flow-' . $suffix;
@@ -505,6 +514,12 @@ class MultiTicketPurchaseFlowIntegrationTest extends TestCase
                 $this->eventDocument->delete();
             }
         } finally {
+            if (isset($this->firestore)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document('comprador-prueba')
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

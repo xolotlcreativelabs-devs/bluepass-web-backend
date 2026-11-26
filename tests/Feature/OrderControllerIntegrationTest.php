@@ -51,6 +51,15 @@ class OrderControllerIntegrationTest extends TestCase
             'transport' => 'rest',
         ]);
 
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-hu05')
+            ->set([
+                'authSubject' => 'comprador-hu05',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $this->eventId = 'pedido-hu05-'
             . bin2hex(random_bytes(8));
 
@@ -128,6 +137,13 @@ class OrderControllerIntegrationTest extends TestCase
                 $this->eventDocument->delete();
             }
         } finally {
+            if (isset($this->firestore)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document('comprador-hu05')
+                    ->delete();
+            }
+
             parent::tearDown();
         }
     }
@@ -198,6 +214,56 @@ class OrderControllerIntegrationTest extends TestCase
             new OrderReservationValidator(),
             new OrderAmountCalculator()
         );
+    }
+
+    public function test_deleting_account_cannot_create_order(): void
+    {
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-hu05')
+            ->update([
+                [
+                    'path' => 'status',
+                    'value' => 'deletion_pending',
+                ],
+            ]);
+
+        $response = $this->createOrder();
+
+        $this->assertSame(
+            403,
+            $response->getStatusCode(),
+            $response->getContent()
+        );
+
+        $orderId = hash(
+            'sha256',
+            'comprador-hu05:' . $this->idempotencyKey
+        );
+
+        $this->assertFalse(
+            $this->firestore
+                ->collection('orders')
+                ->document($orderId)
+                ->snapshot()
+                ->exists()
+        );
+
+        $reservation = $this->reservationDocument
+            ->snapshot()
+            ->data();
+
+        $this->assertArrayNotHasKey(
+            'orderId',
+            $reservation
+        );
+
+        $inventory = $this->ticketDocument
+            ->snapshot()
+            ->data();
+
+        $this->assertSame(2, $inventory['reserved']);
+        $this->assertSame(0, $inventory['sold']);
     }
 
     public function test_creates_order_and_links_reservation(): void

@@ -47,6 +47,15 @@ class OrderSummaryConsistencyTest extends TestCase
         $this->eventId = 'evento-resumen-' . $suffix;
         $this->reservationId = 'reserva-resumen-' . $suffix;
         $this->userId = 'comprador-resumen-' . $suffix;
+
+        $this->firestore
+            ->collection('users')
+            ->document($this->userId)
+            ->set([
+                'authSubject' => $this->userId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
         $this->sellerId = 'vendedor-resumen-' . $suffix;
         $this->key = 'clave-resumen-' . $suffix;
 
@@ -134,6 +143,12 @@ class OrderSummaryConsistencyTest extends TestCase
                 $event->delete();
             }
         } finally {
+            if (isset($this->firestore, $this->userId)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document($this->userId)
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

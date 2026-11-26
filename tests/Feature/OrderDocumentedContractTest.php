@@ -46,6 +46,15 @@ class OrderDocumentedContractTest extends TestCase
         $this->eventId = 'evento-documentado-' . $suffix;
         $this->reservationId = 'reserva-documentada-' . $suffix;
         $this->userId = 'comprador-documentado-' . $suffix;
+
+        $this->firestore
+            ->collection('users')
+            ->document($this->userId)
+            ->set([
+                'authSubject' => $this->userId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
         $this->sellerId = 'vendedor-documentado-' . $suffix;
         $this->key = 'pedido-documentado-' . $suffix;
 
@@ -133,6 +142,12 @@ class OrderDocumentedContractTest extends TestCase
                 $event->delete();
             }
         } finally {
+            if (isset($this->firestore, $this->userId)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document($this->userId)
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

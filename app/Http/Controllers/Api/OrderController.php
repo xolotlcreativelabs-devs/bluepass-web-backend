@@ -120,6 +120,10 @@ class OrderController extends Controller
         );
 
         try {
+            $userDocument = $firestore
+                ->collection('users')
+                ->document($uid);
+
             $eventDocument = $firestore
                 ->collection('events')
                 ->document($eventId);
@@ -153,6 +157,7 @@ class OrderController extends Controller
                 try {
                     $result = $firestore->runTransaction(
                         function (Transaction $transaction) use (
+                            $userDocument,
                             $eventDocument,
                             $reservationDocument,
                             $orderDocument,
@@ -171,6 +176,10 @@ class OrderController extends Controller
                         ): array {
                             // Leer todos los documentos antes
                             // de realizar cualquier escritura.
+                            $userSnapshot = $transaction->snapshot(
+                                $userDocument
+                            );
+
                             $orderSnapshot = $transaction->snapshot(
                                 $orderDocument
                             );
@@ -190,6 +199,28 @@ class OrderController extends Controller
                             ) {
                                 $ticketSnapshots[$typeId] =
                                     $transaction->snapshot($document);
+                            }
+
+                            // Solo las cuentas activas pueden crear pedidos.
+                            if (!$userSnapshot->exists()) {
+                                return [
+                                    'code' => 403,
+                                    'message' => 'La cuenta del comprador no esta disponible.',
+                                ];
+                            }
+
+                            $user = $userSnapshot->data();
+
+                            if (
+                                !is_array($user) ||
+                                ($user['authSubject'] ?? null) !== $uid ||
+                                ($user['role'] ?? null) !== 'customer' ||
+                                ($user['status'] ?? null) !== 'active'
+                            ) {
+                                return [
+                                    'code' => 403,
+                                    'message' => 'La cuenta del comprador no esta activa.',
+                                ];
                             }
 
                             // Comprobar si el pedido ya existe.

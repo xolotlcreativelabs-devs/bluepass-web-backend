@@ -48,6 +48,15 @@ class OrderResponseContractTest extends TestCase
         $this->reservationId = 'reserva-contrato-' . $suffix;
         $this->key = 'clave-contrato-' . $suffix;
         $this->userId = 'comprador-contrato-' . $suffix;
+
+        $this->firestore
+            ->collection('users')
+            ->document($this->userId)
+            ->set([
+                'authSubject' => $this->userId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
         $this->sellerId = 'vendedor-contrato-' . $suffix;
 
         $this->orderId = hash(
@@ -133,6 +142,12 @@ class OrderResponseContractTest extends TestCase
                 $event->delete();
             }
         } finally {
+            if (isset($this->firestore, $this->userId)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document($this->userId)
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

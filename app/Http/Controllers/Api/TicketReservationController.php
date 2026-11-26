@@ -26,7 +26,6 @@ class TicketReservationController extends Controller
 
     /**
      * Crear una reserva temporal de boletos.
-     *
      * Acepta una categoria o varias categorias.
      */
     public function store(
@@ -190,6 +189,10 @@ class TicketReservationController extends Controller
         $quantity = (int) $data['quantity'];
 
         try {
+            $userDocument = $firestore
+                ->collection('users')
+                ->document($uid);
+
             $eventDocument = $firestore
                 ->collection('events')
                 ->document($eventId);
@@ -204,6 +207,7 @@ class TicketReservationController extends Controller
 
             $result = $firestore->runTransaction(
                 function (Transaction $transaction) use (
+                    $userDocument,
                     $eventDocument,
                     $ticketDocument,
                     $reservationDocument,
@@ -212,7 +216,11 @@ class TicketReservationController extends Controller
                     $quantity,
                     $uid
                 ): array {
-                    // Leer los documentos antes de escribir.
+                    // Leer todos los documentos antes de escribir.
+                    $userSnapshot = $transaction->snapshot(
+                        $userDocument
+                    );
+
                     $eventSnapshot = $transaction->snapshot(
                         $eventDocument
                     );
@@ -220,6 +228,28 @@ class TicketReservationController extends Controller
                     $ticketSnapshot = $transaction->snapshot(
                         $ticketDocument
                     );
+
+                    // Comprobar la cuenta dentro de la transaccion.
+                    if (!$userSnapshot->exists()) {
+                        return [
+                            'code' => 403,
+                            'message' => 'La cuenta del comprador no esta disponible.',
+                        ];
+                    }
+
+                    $user = $userSnapshot->data();
+
+                    if (
+                        !is_array($user) ||
+                        ($user['authSubject'] ?? null) !== $uid ||
+                        ($user['role'] ?? null) !== 'customer' ||
+                        ($user['status'] ?? null) !== 'active'
+                    ) {
+                        return [
+                            'code' => 403,
+                            'message' => 'La cuenta del comprador no esta activa.',
+                        ];
+                    }
 
                     if (!$eventSnapshot->exists()) {
                         return [

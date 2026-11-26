@@ -38,6 +38,21 @@ class MultiTicketReservationConcurrencyTest extends TestCase
             'transport' => 'rest',
         ]);
 
+        // Crear los compradores utilizados por los procesos simultaneos.
+        foreach ([
+            'comprador-concurrente-a',
+            'comprador-concurrente-b',
+        ] as $userId) {
+            $this->firestore
+                ->collection('users')
+                ->document($userId)
+                ->set([
+                    'authSubject' => $userId,
+                    'role' => 'customer',
+                    'status' => 'active',
+                ]);
+        }
+
         $this->eventId = 'test-multi-concurrent-'
             . bin2hex(random_bytes(8));
 
@@ -312,6 +327,16 @@ class MultiTicketReservationConcurrencyTest extends TestCase
                 }
 
                 $this->eventDocument->delete();
+
+                foreach ([
+                    'comprador-concurrente-a',
+                    'comprador-concurrente-b',
+                ] as $userId) {
+                    $this->firestore
+                        ->collection('users')
+                        ->document($userId)
+                        ->delete();
+                }
             }
         } finally {
             parent::tearDown();

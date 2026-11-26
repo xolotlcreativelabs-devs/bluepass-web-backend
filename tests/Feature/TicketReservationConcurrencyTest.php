@@ -17,6 +17,7 @@ use Tests\TestCase;
 
 class TicketReservationConcurrencyTest extends TestCase
 {
+    private string $currentUserId = '';
     /**
      * Impedir que dos compradores reserven el mismo ultimo boleto.
      */
@@ -156,11 +157,24 @@ class TicketReservationConcurrencyTest extends TestCase
     private function prepareFirestore(int $requests): array
     {
         $firestore = Mockery::mock(FirestoreClient::class);
+        $users = Mockery::mock(CollectionReference::class);
+        $userDocument = Mockery::mock(DocumentReference::class);
+
         $events = Mockery::mock(CollectionReference::class);
         $eventDocument = Mockery::mock(DocumentReference::class);
         $ticketTypes = Mockery::mock(CollectionReference::class);
         $ticketDocument = Mockery::mock(DocumentReference::class);
         $reservations = Mockery::mock(CollectionReference::class);
+
+        $firestore->shouldReceive('collection')
+            ->times($requests)
+            ->with('users')
+            ->andReturn($users);
+
+        $users->shouldReceive('document')
+            ->times($requests)
+            ->with(Mockery::type('string'))
+            ->andReturn($userDocument);
 
         $firestore->shouldReceive('collection')
             ->times($requests)
@@ -212,6 +226,7 @@ class TicketReservationConcurrencyTest extends TestCase
         return [
             'firestore' => $firestore,
             'eventDocument' => $eventDocument,
+            'userDocument' => $userDocument,
             'ticketDocument' => $ticketDocument,
         ];
     }
@@ -225,6 +240,25 @@ class TicketReservationConcurrencyTest extends TestCase
         bool $applyWrites
     ): Transaction {
         $transaction = Mockery::mock(Transaction::class);
+
+        $userSnapshot = Mockery::mock(DocumentSnapshot::class);
+
+        $transaction->shouldReceive('snapshot')
+            ->once()
+            ->with($references['userDocument'])
+            ->andReturn($userSnapshot);
+
+        $userSnapshot->shouldReceive('exists')
+            ->once()
+            ->andReturn(true);
+
+        $userSnapshot->shouldReceive('data')
+            ->once()
+            ->andReturn([
+                'authSubject' => $this->currentUserId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
 
         $eventSnapshot = Mockery::mock(
             DocumentSnapshot::class
@@ -352,6 +386,8 @@ class TicketReservationConcurrencyTest extends TestCase
             'firebase_role',
             'customer'
         );
+
+        $this->currentUserId = $uid;
 
         $controller = new TicketReservationController();
 

@@ -46,6 +46,15 @@ class OrderIdempotencyExpirationTest extends TestCase
             'transport' => 'rest',
         ]);
 
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-seguridad')
+            ->set([
+                'authSubject' => 'comprador-seguridad',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $suffix = bin2hex(random_bytes(8));
 
         $this->eventId = 'pedido-seguridad-' . $suffix;
@@ -137,6 +146,13 @@ class OrderIdempotencyExpirationTest extends TestCase
                 $eventDocument->delete();
             }
         } finally {
+            if (isset($this->firestore)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document('comprador-seguridad')
+                    ->delete();
+            }
+
             parent::tearDown();
         }
     }
