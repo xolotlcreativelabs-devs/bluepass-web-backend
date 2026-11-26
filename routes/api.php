@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\DeleteAccountController;
 use App\Http\Controllers\Api\EventAvailabilityController;
 use App\Http\Controllers\Api\EventCatalogController;
 use App\Http\Controllers\Api\EventController;
@@ -60,6 +61,12 @@ Route::middleware([
     Route::patch(
         '/users/me',
         [UserProfileController::class, 'update']
+    );
+
+    // Eliminar la cuenta del comprador autenticado.
+    Route::delete(
+        '/users/me',
+        [DeleteAccountController::class, 'destroy']
     );
 
     Route::get(

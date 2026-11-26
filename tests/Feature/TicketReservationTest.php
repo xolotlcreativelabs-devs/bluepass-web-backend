@@ -288,6 +288,10 @@ class TicketReservationTest extends TestCase
             FirestoreClient::class
         );
 
+        $users = Mockery::mock(CollectionReference::class);
+        $userDocument = Mockery::mock(DocumentReference::class);
+        $userSnapshot = Mockery::mock(DocumentSnapshot::class);
+
         $events = Mockery::mock(
             CollectionReference::class
         );
@@ -325,6 +329,33 @@ class TicketReservationTest extends TestCase
         );
 
         $now = new DateTimeImmutable();
+
+        $firestore->shouldReceive('collection')
+            ->once()
+            ->with('users')
+            ->andReturn($users);
+
+        $users->shouldReceive('document')
+            ->once()
+            ->with('comprador-prueba')
+            ->andReturn($userDocument);
+
+        $userSnapshot->shouldReceive('exists')
+            ->once()
+            ->andReturn(true);
+
+        $userSnapshot->shouldReceive('data')
+            ->once()
+            ->andReturn([
+                'authSubject' => 'comprador-prueba',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
+        $transaction->shouldReceive('snapshot')
+            ->once()
+            ->with($userDocument)
+            ->andReturn($userSnapshot);
 
         $firestore->shouldReceive('collection')
             ->once()

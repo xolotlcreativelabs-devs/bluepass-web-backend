@@ -53,6 +53,15 @@ class OrderConcurrencyIntegrationTest extends TestCase
         $this->eventId = 'evento-concurrencia-' . $suffix;
         $this->reservationId = 'reserva-concurrencia-' . $suffix;
         $this->userId = 'comprador-concurrencia-' . $suffix;
+
+        $this->firestore
+            ->collection('users')
+            ->document($this->userId)
+            ->set([
+                'authSubject' => $this->userId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
         $this->sellerId = 'vendedor-concurrencia-' . $suffix;
 
         $this->eventDocument = $this->firestore
@@ -125,6 +134,12 @@ class OrderConcurrencyIntegrationTest extends TestCase
                 $this->eventDocument->delete();
             }
         } finally {
+            if (isset($this->firestore, $this->userId)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document($this->userId)
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

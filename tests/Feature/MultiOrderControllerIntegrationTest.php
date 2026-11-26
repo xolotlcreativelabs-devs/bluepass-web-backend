@@ -53,6 +53,18 @@ class MultiOrderControllerIntegrationTest extends TestCase
             'transport' => 'rest',
         ]);
 
+        // Crear el comprador que utilizara esta prueba.
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-prueba')
+            ->set([
+                'authSubject' => 'comprador-prueba',
+                'name' => 'Comprador de prueba',
+                'email' => 'comprador@example.test',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $suffix = bin2hex(random_bytes(8));
 
         $this->eventId = 'test-multi-order-' . $suffix;
@@ -490,6 +502,11 @@ class MultiOrderControllerIntegrationTest extends TestCase
 
             if (isset($this->eventDocument)) {
                 $this->eventDocument->delete();
+
+                $this->firestore
+                    ->collection('users')
+                    ->document('comprador-prueba')
+                    ->delete();
             }
         } finally {
             parent::tearDown();

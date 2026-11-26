@@ -4,7 +4,9 @@ namespace App\Services;
 
 use App\Mail\PurchaseConfirmationMail;
 use DateTimeImmutable;
+use Google\Cloud\Core\Exception\AbortedException;
 use Google\Cloud\Core\Timestamp;
+use Google\Cloud\Firestore\DocumentReference;
 use Google\Cloud\Firestore\FirestoreClient;
 use Google\Cloud\Firestore\Transaction;
 use Illuminate\Support\Facades\Mail;
@@ -13,6 +15,8 @@ use Throwable;
 
 class PurchaseEmailProcessorService
 {
+    private const MAX_TRANSACTION_ATTEMPTS = 8;
+
     public function __construct(
         private FirestoreClient $firestore
     ) {
@@ -75,8 +79,10 @@ class PurchaseEmailProcessorService
 
         $claimId = bin2hex(random_bytes(16));
 
-        // Reservar el correo antes de enviarlo.
-        $claim = $this->firestore->runTransaction(
+        // Reservar el correo mediante una transaccion.
+        // Un conflicto solo debe reintentar la reserva,
+        // nunca el envio del mensaje.
+        $claim = $this->runTransactionWithRetry(
             function (Transaction $transaction) use (
                 $document,
                 $claimId
@@ -101,7 +107,8 @@ class PurchaseEmailProcessorService
 
                 $status = $email['status'] ?? null;
 
-                // No reenviar mensajes aceptados o inciertos.
+                // Nunca reenviar un correo previamente
+                // aceptado, incierto o en procesamiento.
                 if (
                     in_array(
                         $status,
@@ -223,6 +230,8 @@ class PurchaseEmailProcessorService
                     new DateTimeImmutable()
                 );
 
+                // Solo el proceso que confirme esta
+                // transaccion podra enviar el correo.
                 $transaction->update(
                     $document,
                     [
@@ -260,6 +269,7 @@ class PurchaseEmailProcessorService
             }
         );
 
+        // Otro proceso ya reservo o termino el correo.
         if ($claim['ready'] !== true) {
             return [
                 'emailId' => $emailId,
@@ -268,7 +278,9 @@ class PurchaseEmailProcessorService
             ];
         }
 
-        // El correo se envia FUERA de la transaccion.
+        // El correo se envia fuera de la transaccion.
+        // Esta operacion NO debe reintentarse
+        // automaticamente porque podria duplicarse.
         try {
             Mail::to($claim['recipientEmail'])->send(
                 new PurchaseConfirmationMail(
@@ -278,8 +290,8 @@ class PurchaseEmailProcessorService
                 )
             );
         } catch (Throwable $exception) {
-            // No se puede saber siempre si el proveedor
-            // alcanzo a aceptar el mensaje antes del error.
+            // El proveedor pudo aceptar el mensaje
+            // antes de devolver el error.
             $this->finish(
                 $document,
                 $claimId,
@@ -311,16 +323,60 @@ class PurchaseEmailProcessorService
     }
 
     /**
-     * Guardar el resultado sin permitir que otro intento
-     * modifique una operacion diferente.
+     * Reintentar solamente transacciones canceladas
+     * por conflictos temporales de Firestore.
+     */
+    private function runTransactionWithRetry(
+        callable $callback
+    ): mixed {
+        for (
+            $attempt = 1;
+            $attempt <= self::MAX_TRANSACTION_ATTEMPTS;
+            $attempt++
+        ) {
+            try {
+                return $this->firestore->runTransaction(
+                    $callback
+                );
+            } catch (AbortedException $exception) {
+                if (
+                    $attempt ===
+                    self::MAX_TRANSACTION_ATTEMPTS
+                ) {
+                    throw $exception;
+                }
+
+                // Espera progresiva para evitar que
+                // los procesos vuelvan a chocar.
+                $delay = min(
+                    150000 * (2 ** ($attempt - 1)),
+                    2000000
+                );
+
+                $jitter = random_int(0, 100000);
+
+                usleep($delay + $jitter);
+            }
+        }
+
+        throw new RuntimeException(
+            'No fue posible completar la transaccion.'
+        );
+    }
+
+    /**
+     * Guardar el resultado sin permitir que otro
+     * proceso modifique un intento diferente.
      */
     private function finish(
-        $document,
+        DocumentReference $document,
         string $claimId,
         string $status,
         ?string $errorCode
     ): void {
-        $this->firestore->runTransaction(
+        // Tambien se reintenta esta transaccion,
+        // pero nunca se vuelve a enviar el mensaje.
+        $this->runTransactionWithRetry(
             function (Transaction $transaction) use (
                 $document,
                 $claimId,

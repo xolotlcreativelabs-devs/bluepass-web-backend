@@ -38,6 +38,15 @@ class MultiTicketReservationIntegrationTest extends TestCase
         FirestoreClient $firestore,
         int $vipCapacity = 5
     ): array {
+        $firestore
+            ->collection('users')
+            ->document('comprador-prueba')
+            ->set([
+                'authSubject' => 'comprador-prueba',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $eventId = 'multi-prueba-' . bin2hex(random_bytes(8));
 
         $eventDocument = $firestore
@@ -91,6 +100,7 @@ class MultiTicketReservationIntegrationTest extends TestCase
         }
 
         return [
+            'firestore' => $firestore,
             'eventId' => $eventId,
             'eventDocument' => $eventDocument,
             'ticketDocuments' => $documents,
@@ -119,6 +129,11 @@ class MultiTicketReservationIntegrationTest extends TestCase
         }
 
         $eventDocument->delete();
+
+        $testEvent['firestore']
+            ->collection('users')
+            ->document('comprador-prueba')
+            ->delete();
     }
 
     /**

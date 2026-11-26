@@ -43,6 +43,16 @@ class TicketReservationIntegrationTest extends TestCase
         FirestoreClient $firestore,
         int $capacity = 10
     ): array {
+        $userDocument = $firestore
+            ->collection('users')
+            ->document('comprador-prueba');
+
+        $userDocument->set([
+            'authSubject' => 'comprador-prueba',
+            'role' => 'customer',
+            'status' => 'active',
+        ]);
+
         $eventId = 'prueba-hu04-' . bin2hex(random_bytes(8));
 
         $eventDocument = $firestore
@@ -81,6 +91,7 @@ class TicketReservationIntegrationTest extends TestCase
         return [
             'eventId' => $eventId,
             'eventDocument' => $eventDocument,
+            'userDocument' => $userDocument,
             'ticketDocument' => $ticketDocument,
         ];
     }
@@ -175,6 +186,7 @@ class TicketReservationIntegrationTest extends TestCase
 
         $testEvent['ticketDocument']->delete();
         $eventDocument->delete();
+        $testEvent['userDocument']->delete();
     }
 
     /**

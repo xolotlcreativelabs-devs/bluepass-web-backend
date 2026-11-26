@@ -41,6 +41,15 @@ class MultiTicketReservationReleaseIntegrationTest extends TestCase
             'transport' => 'rest',
         ]);
 
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-prueba')
+            ->set([
+                'authSubject' => 'comprador-prueba',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $this->eventId = 'test-multi-release-'
             . bin2hex(random_bytes(8));
 
@@ -388,6 +397,11 @@ class MultiTicketReservationReleaseIntegrationTest extends TestCase
                 }
 
                 $this->eventDocument->delete();
+
+                $this->firestore
+                    ->collection('users')
+                    ->document('comprador-prueba')
+                    ->delete();
             }
         } finally {
             parent::tearDown();

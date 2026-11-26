@@ -46,6 +46,15 @@ class OrderSellerValidationTest extends TestCase
         $this->reservationId = 'reserva-sin-vendedor-' . $suffix;
         $this->userId = 'comprador-vendedor-' . $suffix;
 
+        $this->firestore
+            ->collection('users')
+            ->document($this->userId)
+            ->set([
+                'authSubject' => $this->userId,
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $key = 'clave-sin-vendedor-' . $suffix;
 
         $this->orderId = hash(
@@ -134,6 +143,12 @@ class OrderSellerValidationTest extends TestCase
                 $event->delete();
             }
         } finally {
+            if (isset($this->firestore, $this->userId)) {
+                $this->firestore
+                    ->collection('users')
+                    ->document($this->userId)
+                    ->delete();
+            }
             parent::tearDown();
         }
     }

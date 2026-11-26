@@ -46,6 +46,15 @@ class MultiTicketReservationExpirationIntegrationTest extends TestCase
             $this->firestore
         );
 
+        $this->firestore
+            ->collection('users')
+            ->document('comprador-prueba')
+            ->set([
+                'authSubject' => 'comprador-prueba',
+                'role' => 'customer',
+                'status' => 'active',
+            ]);
+
         $this->eventId = 'test-multi-expire-'
             . bin2hex(random_bytes(8));
 
@@ -412,6 +421,11 @@ class MultiTicketReservationExpirationIntegrationTest extends TestCase
                 }
 
                 $this->eventDocument->delete();
+
+                $this->firestore
+                    ->collection('users')
+                    ->document('comprador-prueba')
+                    ->delete();
             }
         } finally {
             parent::tearDown();
