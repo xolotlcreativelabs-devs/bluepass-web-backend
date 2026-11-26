@@ -13,8 +13,12 @@
 .env.backup
 .env.production
 
-# Credenciales privadas de Firebase
+# Credenciales de Firebase
 /storage/firebase/*.json
+
+# Registros de Firebase Emulator
+/firebase-debug.log
+/firestore-debug.log
 
 .phpactor.json
 .phpunit.result.cache

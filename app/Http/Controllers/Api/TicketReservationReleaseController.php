@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\ReservationItems;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
@@ -17,7 +18,7 @@ use Throwable;
 class TicketReservationReleaseController extends Controller
 {
     /**
-     * Cancelar una reserva y liberar sus boletos.
+     * Cancelar una reserva y liberar todos sus boletos.
      */
     public function destroy(
         Request $request,
@@ -62,6 +63,7 @@ class TicketReservationReleaseController extends Controller
                     $firestore,
                     $eventDocument,
                     $reservationDocument,
+                    $eventId,
                     $reservationId,
                     $uid
                 ): array {
@@ -84,6 +86,7 @@ class TicketReservationReleaseController extends Controller
                         );
                     }
 
+                    // Ocultar reservas de otros compradores.
                     if (($reservation['userId'] ?? null) !== $uid) {
                         return [
                             'code' => 404,
@@ -91,9 +94,19 @@ class TicketReservationReleaseController extends Controller
                         ];
                     }
 
+                    // Comparar con el evento recibido en la ruta.
+                    if (
+                        ($reservation['eventId'] ?? null) !==
+                        $eventId
+                    ) {
+                        throw new RuntimeException(
+                            'El evento de la reserva no coincide.'
+                        );
+                    }
+
                     $status = $reservation['status'] ?? null;
 
-                    // No liberar el inventario dos veces.
+                    // No liberar inventario de reservas cerradas.
                     if (in_array(
                         $status,
                         ['cancelled', 'expired'],
@@ -115,61 +128,82 @@ class TicketReservationReleaseController extends Controller
                         ];
                     }
 
-                    $ticketTypeId = $reservation['ticketTypeId'] ?? null;
-                    $quantity = $reservation['quantity'] ?? null;
+                    // Interpretar reservas tradicionales y multiples.
+                    $items = (new ReservationItems())
+                        ->fromReservation($reservation);
 
-                    if (
-                        !$this->validId($ticketTypeId) ||
-                        !is_int($quantity) ||
-                        $quantity < 1
-                    ) {
-                        throw new RuntimeException(
-                            'La reserva contiene datos invalidos.'
-                        );
-                    }
-
-                    $ticketDocument = $eventDocument
-                        ->collection('ticketTypes')
-                        ->document($ticketTypeId);
-
-                    $ticketSnapshot = $transaction->snapshot(
-                        $ticketDocument
+                    $isMultiple = array_key_exists(
+                        'items',
+                        $reservation
                     );
 
-                    if (!$ticketSnapshot->exists()) {
-                        throw new RuntimeException(
-                            'No se encontro el inventario de la reserva.'
-                        );
+                    $ticketDocuments = [];
+
+                    foreach ($items as $item) {
+                        $typeId = $item['ticketTypeId'];
+
+                        $ticketDocuments[$typeId] = $eventDocument
+                            ->collection('ticketTypes')
+                            ->document($typeId);
                     }
 
-                    $ticket = $ticketSnapshot->data();
+                    // Leer y validar todos los inventarios.
+                    $inventoryUpdates = [];
 
-                    if (!is_array($ticket)) {
-                        throw new RuntimeException(
-                            'Los datos del inventario son invalidos.'
+                    foreach ($items as $item) {
+                        $typeId = $item['ticketTypeId'];
+                        $quantity = $item['quantity'];
+
+                        $ticketSnapshot = $transaction->snapshot(
+                            $ticketDocuments[$typeId]
                         );
+
+                        if (!$ticketSnapshot->exists()) {
+                            throw new RuntimeException(
+                                'No se encontro el inventario de la reserva.'
+                            );
+                        }
+
+                        $ticket = $ticketSnapshot->data();
+
+                        if (!is_array($ticket)) {
+                            throw new RuntimeException(
+                                'Los datos del inventario son invalidos.'
+                            );
+                        }
+
+                        $capacity = $ticket['capacity'] ?? null;
+                        $sold = $ticket['sold'] ?? null;
+                        $reserved = $ticket['reserved'] ?? null;
+
+                        if (
+                            !is_int($capacity) ||
+                            !is_int($sold) ||
+                            !is_int($reserved) ||
+                            $capacity < 0 ||
+                            $sold < 0 ||
+                            $reserved < $quantity ||
+                            $sold > $capacity ||
+                            $reserved > ($capacity - $sold)
+                        ) {
+                            throw new RuntimeException(
+                                'El inventario es inconsistente.'
+                            );
+                        }
+
+                        $newReserved = $reserved - $quantity;
+
+                        $inventoryUpdates[$typeId] = [
+                            'capacity' => $capacity,
+                            'sold' => $sold,
+                            'reserved' => $newReserved,
+                            'available' => $capacity
+                                - $sold
+                                - $newReserved,
+                        ];
                     }
 
-                    $capacity = $ticket['capacity'] ?? null;
-                    $sold = $ticket['sold'] ?? null;
-                    $reserved = $ticket['reserved'] ?? null;
-
-                    if (
-                        !is_int($capacity) ||
-                        !is_int($sold) ||
-                        !is_int($reserved) ||
-                        $capacity < 0 ||
-                        $sold < 0 ||
-                        $reserved < $quantity ||
-                        $sold > $capacity ||
-                        $reserved > ($capacity - $sold)
-                    ) {
-                        throw new RuntimeException(
-                            'El inventario es inconsistente.'
-                        );
-                    }
-
-                    // Consultar el pedido antes de modificar documentos.
+                    // Comprobar el pedido asociado, si existe.
                     $orderDocument = null;
                     $orderId = $reservation['orderId'] ?? null;
 
@@ -199,21 +233,33 @@ class TicketReservationReleaseController extends Controller
                         if (
                             !is_array($order) ||
                             ($order['userId'] ?? null) !== $uid ||
-                            ($order['eventId'] ?? null) !==
-                                ($reservation['eventId'] ?? null) ||
-                            ($order['reservationId'] ?? null) !== $reservationId
+                            ($order['eventId'] ?? null) !== $eventId ||
+                            ($order['reservationId'] ?? null) !==
+                                $reservationId
                         ) {
                             throw new RuntimeException(
                                 'El pedido no coincide con la reserva.'
                             );
                         }
 
-                        // No liberar una reserva asociada a un
-                        // pedido que ya dejo de estar pendiente.
+                        // Comprobar los tipos de los pedidos mixtos.
+                        if ($isMultiple) {
+                            $orderItems = (new ReservationItems())
+                                ->fromReservation($order);
+
+                            if ($orderItems !== $items) {
+                                throw new RuntimeException(
+                                    'Los boletos del pedido no coinciden.'
+                                );
+                            }
+                        }
+
+                        // Los pedidos pagados no pueden cancelarse.
                         if (($order['status'] ?? null) !== 'pending') {
                             return [
                                 'code' => 409,
-                                'message' => 'El pedido ya no permite cancelar su reserva.',
+                                'message' =>
+                                    'El pedido ya no permite cancelar su reserva.',
                             ];
                         }
                     }
@@ -235,19 +281,23 @@ class TicketReservationReleaseController extends Controller
                         ? 'expired'
                         : 'cancelled';
 
-                    // Actualizar el inventario solo una vez.
-                    $transaction->update($ticketDocument, [
-                        [
-                            'path' => 'reserved',
-                            'value' => $reserved - $quantity,
-                        ],
-                        [
-                            'path' => 'updatedAt',
-                            'value' => $timestamp,
-                        ],
-                    ]);
+                    // Todas las escrituras son transaccionales.
+                    foreach ($inventoryUpdates as $typeId => $inventory) {
+                        $transaction->update(
+                            $ticketDocuments[$typeId],
+                            [
+                                [
+                                    'path' => 'reserved',
+                                    'value' => $inventory['reserved'],
+                                ],
+                                [
+                                    'path' => 'updatedAt',
+                                    'value' => $timestamp,
+                                ],
+                            ]
+                        );
+                    }
 
-                    // Cerrar la reserva.
                     $transaction->update($reservationDocument, [
                         [
                             'path' => 'status',
@@ -259,7 +309,6 @@ class TicketReservationReleaseController extends Controller
                         ],
                     ]);
 
-                    // Cerrar tambien el pedido asociado.
                     if ($orderDocument !== null) {
                         $transaction->update($orderDocument, [
                             [
@@ -273,26 +322,30 @@ class TicketReservationReleaseController extends Controller
                         ]);
                     }
 
-                    return [
+                    $response = [
                         'code' => 200,
                         'message' => 'Reserva liberada correctamente.',
                         'reservationId' => $reservationId,
                         'released' => true,
                         'status' => $newStatus,
                         'orderId' => $orderId,
-                        'inventory' => [
-                            'capacity' => $capacity,
-                            'sold' => $sold,
-                            'reserved' => $reserved - $quantity,
-                            'available' => $capacity
-                                - $sold
-                                - ($reserved - $quantity),
-                        ],
                     ];
+
+                    if ($isMultiple) {
+                        $response['inventories'] = $inventoryUpdates;
+                    } else {
+                        $typeId = $items[0]['ticketTypeId'];
+
+                        $response['inventory'] =
+                            $inventoryUpdates[$typeId];
+                    }
+
+                    return $response;
                 }
             );
 
             $statusCode = $result['code'] ?? 500;
+
             unset($result['code']);
 
             return response()->json($result, $statusCode);
@@ -313,11 +366,14 @@ class TicketReservationReleaseController extends Controller
     private function validId(mixed $id): bool
     {
         return is_string($id) &&
-            preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) === 1;
+            preg_match(
+                '/^[A-Za-z0-9_-]{1,128}$/D',
+                $id
+            ) === 1;
     }
 
     /**
-     * Convertir una fecha almacenada en Firestore.
+     * Convertir una fecha de Firestore.
      */
     private function readTimestamp(
         mixed $value

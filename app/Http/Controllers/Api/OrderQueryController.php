@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\PurchaseStatusMessageService;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
@@ -17,7 +18,7 @@ class OrderQueryController extends Controller
     private const PAGE_LIMIT = 50;
 
     /**
-     * Consultar los pedidos del comprador autenticado.
+     * Consultar el historial del comprador autenticado.
      */
     public function index(
         Request $request,
@@ -43,6 +44,13 @@ class OrderQueryController extends Controller
                 ->documents();
 
             $orders = [];
+            $groups = $this->emptyGroups();
+            $eventCache = [];
+            $now = new DateTimeImmutable();
+
+            $messageService = app(
+                PurchaseStatusMessageService::class
+            );
 
             foreach ($documents as $document) {
                 if (!$document->exists()) {
@@ -58,9 +66,38 @@ class OrderQueryController extends Controller
                     continue;
                 }
 
-                $orders[] = $this->formatOrder(
+                // Conservar el resumen original del pedido.
+                $order = $this->formatOrder(
                     $document->id(),
-                    $data
+                    $data,
+                    $now
+                );
+
+                $orders[] = $order;
+
+                // Clasificar el pedido dentro del historial.
+                $history = $this->historyData(
+                    $data,
+                    $order['status'],
+                    $firestore,
+                    $eventCache,
+                    $now
+                );
+
+                // El aviso utiliza el estado actualizado del resumen.
+                $notification = $this->notificationData(
+                    $data,
+                    $order['status'],
+                    $messageService
+                );
+
+                // Agregar informacion sin modificar orders.
+                $groups[$history['group']][] = array_merge(
+                    $order,
+                    $history,
+                    [
+                        'notification' => $notification,
+                    ]
                 );
             }
 
@@ -68,6 +105,7 @@ class OrderQueryController extends Controller
                 'message' => 'Pedidos consultados correctamente.',
                 'orders' => $orders,
                 'count' => count($orders),
+                'groups' => $groups,
             ]);
         } catch (Throwable $exception) {
             Log::error('Error al consultar pedidos BluePass', [
@@ -95,14 +133,12 @@ class OrderQueryController extends Controller
         }
 
         if (
-            !preg_match(
+            preg_match(
                 '/^[A-Za-z0-9_-]{1,128}$/D',
                 $orderId
-            )
+            ) !== 1
         ) {
-            return response()->json([
-                'message' => 'El pedido no existe.',
-            ], 404);
+            return $this->notFound();
         }
 
         try {
@@ -112,29 +148,54 @@ class OrderQueryController extends Controller
                 ->snapshot();
 
             if (!$document->exists()) {
-                return response()->json([
-                    'message' => 'El pedido no existe.',
-                ], 404);
+                return $this->notFound();
             }
 
             $data = $document->data();
 
-            // No revelar pedidos pertenecientes a otros compradores.
+            // Ocultar los pedidos de otros compradores.
             if (
                 !is_array($data) ||
                 ($data['userId'] ?? null) !== $uid
             ) {
-                return response()->json([
-                    'message' => 'El pedido no existe.',
-                ], 404);
+                return $this->notFound();
             }
+
+            $now = new DateTimeImmutable();
+
+            // El resumen mantiene el contrato anterior.
+            $order = $this->formatOrder(
+                $orderId,
+                $data,
+                $now
+            );
+
+            $eventCache = [];
+
+            // Los datos adicionales van fuera de order.
+            $history = $this->historyData(
+                $data,
+                $order['status'],
+                $firestore,
+                $eventCache,
+                $now
+            );
+
+            $messageService = app(
+                PurchaseStatusMessageService::class
+            );
+
+            $notification = $this->notificationData(
+                $data,
+                $order['status'],
+                $messageService
+            );
 
             return response()->json([
                 'message' => 'Pedido consultado correctamente.',
-                'order' => $this->formatOrder(
-                    $orderId,
-                    $data
-                ),
+                'order' => $order,
+                'history' => $history,
+                'notification' => $notification,
             ]);
         } catch (Throwable $exception) {
             Log::error('Error al consultar detalle de pedido', [
@@ -155,11 +216,11 @@ class OrderQueryController extends Controller
         $uid = $request->attributes->get('firebase_uid');
         $role = $request->attributes->get('firebase_role');
 
-        if (!is_string($uid) || $uid === '') {
-            return null;
-        }
-
-        if ($role !== 'customer') {
+        if (
+            !is_string($uid) ||
+            $uid === '' ||
+            $role !== 'customer'
+        ) {
             return null;
         }
 
@@ -182,12 +243,205 @@ class OrderQueryController extends Controller
         ], $status);
     }
 
+    private function notFound(): JsonResponse
+    {
+        return response()->json([
+            'message' => 'El pedido no existe.',
+        ], 404);
+    }
+
     /**
-     * Preparar el resumen que puede ver el comprador.
+     * Preparar las secciones del historial.
+     */
+    private function emptyGroups(): array
+    {
+        return [
+            'upcoming' => [],
+            'ongoing' => [],
+            'past' => [],
+            'pending' => [],
+            'cancelled' => [],
+            'unknown' => [],
+        ];
+    }
+
+    /**
+     * Consultar un evento una sola vez por solicitud.
+     */
+    private function eventData(
+        string $eventId,
+        FirestoreClient $firestore,
+        array &$eventCache
+    ): ?array {
+        if (array_key_exists($eventId, $eventCache)) {
+            return $eventCache[$eventId];
+        }
+
+        if (
+            preg_match(
+                '/^[A-Za-z0-9_-]{1,128}$/D',
+                $eventId
+            ) !== 1
+        ) {
+            $eventCache[$eventId] = null;
+
+            return null;
+        }
+
+        $document = $firestore
+            ->collection('events')
+            ->document($eventId)
+            ->snapshot();
+
+        if (!$document->exists()) {
+            $eventCache[$eventId] = null;
+
+            return null;
+        }
+
+        $event = $document->data();
+
+        $eventCache[$eventId] = is_array($event)
+            ? $event
+            : null;
+
+        return $eventCache[$eventId];
+    }
+
+    /**
+     * Clasificar el pedido segun su estado y fechas.
+     */
+    private function classifyOrder(
+        string $status,
+        ?DateTimeImmutable $start,
+        ?DateTimeImmutable $end,
+        DateTimeImmutable $now
+    ): string {
+        if (in_array($status, ['cancelled', 'expired'], true)) {
+            return 'cancelled';
+        }
+
+        if ($status === 'pending') {
+            return 'pending';
+        }
+
+        if ($status !== 'paid') {
+            return 'unknown';
+        }
+
+        if (
+            $start === null ||
+            $end === null ||
+            $end <= $start
+        ) {
+            return 'unknown';
+        }
+
+        if ($now < $start) {
+            return 'upcoming';
+        }
+
+        if ($now >= $end) {
+            return 'past';
+        }
+
+        return 'ongoing';
+    }
+
+    /**
+     * Preparar los datos adicionales del historial.
+     */
+    private function historyData(
+        array $order,
+        mixed $status,
+        FirestoreClient $firestore,
+        array &$eventCache,
+        DateTimeImmutable $now
+    ): array {
+        $eventId = $order['eventId'] ?? null;
+        $event = null;
+
+        if (
+            $status === 'paid' &&
+            is_string($eventId) &&
+            $eventId !== ''
+        ) {
+            $event = $this->eventData(
+                $eventId,
+                $firestore,
+                $eventCache
+            );
+        }
+
+        $start = $this->readTimestamp(
+            $event['date'] ?? null
+        );
+
+        $end = $this->readTimestamp(
+            $event['endAt'] ?? null
+        );
+
+        $group = $this->classifyOrder(
+            is_string($status) ? $status : '',
+            $start,
+            $end,
+            $now
+        );
+
+        $eventDetails = null;
+
+        if ($event !== null) {
+            $eventDetails = [
+                'id' => $eventId,
+                'name' => $event['name'] ?? null,
+                'venue' => $event['venue'] ?? null,
+                'timezone' => $event['timezone'] ?? null,
+                'date' => $start?->format(
+                    DateTimeInterface::ATOM
+                ),
+                'endAt' => $end?->format(
+                    DateTimeInterface::ATOM
+                ),
+            ];
+        }
+
+        return [
+            'group' => $group,
+            'event' => $eventDetails,
+            'createdAt' => $this->formatTimestamp(
+                $order['createdAt'] ?? null
+            ),
+            'paidAt' => $this->formatTimestamp(
+                $order['paidAt'] ?? null
+            ),
+        ];
+    }
+
+    /**
+     * Preparar el aviso sin modificar los datos del pedido.
+     */
+    private function notificationData(
+        array $data,
+        mixed $status,
+        PurchaseStatusMessageService $messageService
+    ): array {
+        $notificationOrder = $data;
+
+        // Utilizar el estado calculado para reservas vencidas.
+        $notificationOrder['status'] = $status;
+
+        return $messageService->forOrder(
+            $notificationOrder
+        );
+    }
+
+    /**
+     * Mantener el resumen original usado al crear el pedido.
      */
     private function formatOrder(
         string $orderId,
-        array $order
+        array $order,
+        DateTimeImmutable $now
     ): array {
         $expiresAt = $this->readTimestamp(
             $order['expiresAt'] ?? null
@@ -195,17 +449,17 @@ class OrderQueryController extends Controller
 
         $status = $order['status'] ?? null;
 
-        // Mostrar vencimiento efectivo aunque el proceso automatico
-        // todavia no haya actualizado el documento.
+        // Reflejar vencimientos aunque la tarea automatica
+        // todavia no haya actualizado el pedido.
         if (
             $status === 'pending' &&
             $expiresAt !== null &&
-            new DateTimeImmutable() >= $expiresAt
+            $now >= $expiresAt
         ) {
             $status = 'expired';
         }
 
-        // Mantener compatibilidad con pedidos anteriores.
+        // Conservar compatibilidad con pedidos anteriores.
         $items = $order['items'] ?? null;
 
         if (!is_array($items)) {
@@ -251,7 +505,7 @@ class OrderQueryController extends Controller
     }
 
     /**
-     * Convertir las fechas de Firestore.
+     * Convertir fechas de Firestore.
      */
     private function readTimestamp(
         mixed $value
@@ -265,5 +519,12 @@ class OrderQueryController extends Controller
         }
 
         return DateTimeImmutable::createFromInterface($value);
+    }
+
+    private function formatTimestamp(mixed $value): ?string
+    {
+        return $this->readTimestamp($value)?->format(
+            DateTimeInterface::ATOM
+        );
     }
 }

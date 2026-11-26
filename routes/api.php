@@ -13,8 +13,12 @@ use App\Http\Controllers\Api\NewsController;
 use App\Http\Controllers\Api\NewsStatusController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\OrderQueryController;
+use App\Http\Controllers\Api\OrderReceiptController;
 use App\Http\Controllers\Api\PasswordResetController;
+use App\Http\Controllers\Api\PurchaseNotificationController;
 use App\Http\Controllers\Api\RegisterCustomerController;
+use App\Http\Controllers\Api\TicketPrintController;
+use App\Http\Controllers\Api\TicketQueryController;
 use App\Http\Controllers\Api\TicketReservationController;
 use App\Http\Controllers\Api\TicketReservationReleaseController;
 use App\Http\Controllers\Api\UserProfileController;
@@ -148,7 +152,7 @@ Route::middleware([
     );
 });
 
-// Rutas protegidas de reservas y pedidos.
+// Rutas protegidas de reservas, pedidos, boletos y comprobantes.
 Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth:customer',
@@ -176,6 +180,43 @@ Route::middleware([
     Route::get(
         '/orders/{orderId}',
         [OrderQueryController::class, 'show']
+    );
+
+    Route::get(
+        '/orders/{orderId}/receipt',
+        [OrderReceiptController::class, 'show']
+    );
+
+    Route::get(
+        '/tickets',
+        [TicketQueryController::class, 'index']
+    );
+
+    Route::get(
+        '/tickets/{ticketId}',
+        [TicketQueryController::class, 'show']
+    );
+
+    Route::get(
+        '/tickets/{ticketId}/qr',
+        [TicketQueryController::class, 'qr']
+    );
+
+    Route::get(
+        '/tickets/{ticketId}/print',
+        [TicketPrintController::class, 'show']
+    );
+
+    // Consultar las notificaciones del comprador.
+    Route::get(
+        '/users/me/notifications',
+        [PurchaseNotificationController::class, 'index']
+    );
+
+    // Marcar como leida una notificacion propia.
+    Route::patch(
+        '/users/me/notifications/{notificationId}/read',
+        [PurchaseNotificationController::class, 'markRead']
     );
 });
 
