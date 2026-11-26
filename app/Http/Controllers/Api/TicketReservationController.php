@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\MultiTicketReservationService;
+use App\Services\MultiTicketSelectionValidator;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
@@ -12,6 +14,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
+use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 
@@ -22,6 +26,8 @@ class TicketReservationController extends Controller
 
     /**
      * Crear una reserva temporal de boletos.
+     *
+     * Acepta una categoria o varias categorias.
      */
     public function store(
         Request $request,
@@ -33,7 +39,7 @@ class TicketReservationController extends Controller
 
         if (!is_string($uid) || $uid === '') {
             return response()->json([
-                'message' => 'Debes iniciar sesión para reservar boletos.',
+                'message' => 'Debes iniciar sesion para reservar boletos.',
             ], 401);
         }
 
@@ -43,12 +49,98 @@ class TicketReservationController extends Controller
             ], 403);
         }
 
-        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $eventId)) {
+        if (
+            !preg_match(
+                '/^[A-Za-z0-9_-]{1,128}$/D',
+                $eventId
+            )
+        ) {
             return response()->json([
                 'message' => 'El evento no existe.',
             ], 404);
         }
 
+        // Las reservas multiples utilizan el servicio
+        // que controla todas las categorias en una transaccion.
+        if ($request->exists('items')) {
+            return $this->storeMultiple(
+                $request,
+                $eventId,
+                $uid,
+                $firestore
+            );
+        }
+
+        // Mantener el funcionamiento tradicional.
+        return $this->storeSingle(
+            $request,
+            $eventId,
+            $uid,
+            $firestore
+        );
+    }
+
+    /**
+     * Crear una reserva de varias categorias.
+     */
+    private function storeMultiple(
+        Request $request,
+        string $eventId,
+        string $uid,
+        FirestoreClient $firestore
+    ): JsonResponse {
+        try {
+            $service = new MultiTicketReservationService(
+                $firestore,
+                new MultiTicketSelectionValidator()
+            );
+
+            $result = $service->create(
+                $eventId,
+                $uid,
+                $request->all()
+            );
+
+            $statusCode = $result['code'] ?? 500;
+
+            unset($result['code']);
+
+            return response()->json(
+                $result,
+                $statusCode
+            );
+        } catch (ValidationException $exception) {
+            return response()->json([
+                'message' => 'Los datos de la reserva no son validos.',
+                'errors' => $exception->errors(),
+            ], 422);
+        } catch (InvalidArgumentException $exception) {
+            return response()->json([
+                'message' => 'Los datos de la reserva no son validos.',
+            ], 422);
+        } catch (Throwable $exception) {
+            Log::error(
+                'Error al crear reserva multiple BluePass',
+                [
+                    'exception' => get_class($exception),
+                ]
+            );
+
+            return response()->json([
+                'message' => 'No fue posible crear la reserva.',
+            ], 500);
+        }
+    }
+
+    /**
+     * Crear una reserva tradicional de una categoria.
+     */
+    private function storeSingle(
+        Request $request,
+        string $eventId,
+        string $uid,
+        FirestoreClient $firestore
+    ): JsonResponse {
         $allowedFields = [
             'ticketTypeId',
             'quantity',
@@ -68,23 +160,26 @@ class TicketReservationController extends Controller
             ], 422);
         }
 
-        $validator = Validator::make($request->all(), [
-            'ticketTypeId' => [
-                'required',
-                'string',
-                'regex:/^[A-Za-z0-9_-]{1,128}$/D',
-            ],
-            'quantity' => [
-                'required',
-                'integer',
-                'min:1',
-                'max:' . self::MAX_TICKETS_PER_RESERVATION,
-            ],
-        ]);
+        $validator = Validator::make(
+            $request->all(),
+            [
+                'ticketTypeId' => [
+                    'required',
+                    'string',
+                    'regex:/^[A-Za-z0-9_-]{1,128}$/D',
+                ],
+                'quantity' => [
+                    'required',
+                    'integer',
+                    'min:1',
+                    'max:' . self::MAX_TICKETS_PER_RESERVATION,
+                ],
+            ]
+        );
 
         if ($validator->fails()) {
             return response()->json([
-                'message' => 'Los datos de la reserva no son válidos.',
+                'message' => 'Los datos de la reserva no son validos.',
                 'errors' => $validator->errors(),
             ], 422);
         }
@@ -117,7 +212,7 @@ class TicketReservationController extends Controller
                     $quantity,
                     $uid
                 ): array {
-                    // Leer el evento y el inventario antes de escribir.
+                    // Leer los documentos antes de escribir.
                     $eventSnapshot = $transaction->snapshot(
                         $eventDocument
                     );
@@ -160,7 +255,7 @@ class TicketReservationController extends Controller
                     ) {
                         return [
                             'code' => 409,
-                            'message' => 'El tipo de boleto no está disponible.',
+                            'message' => 'El tipo de boleto no esta disponible.',
                         ];
                     }
 
@@ -186,21 +281,21 @@ class TicketReservationController extends Controller
                     ) {
                         return [
                             'code' => 409,
-                            'message' => 'El boleto no tiene un periodo de venta válido.',
+                            'message' => 'El boleto no tiene un periodo de venta valido.',
                         ];
                     }
 
                     if ($now >= $eventStart) {
                         return [
                             'code' => 409,
-                            'message' => 'El evento ya comenzó.',
+                            'message' => 'El evento ya comenzo.',
                         ];
                     }
 
                     if ($now < $saleStart) {
                         return [
                             'code' => 409,
-                            'message' => 'La venta de boletos todavía no comienza.',
+                            'message' => 'La venta de boletos todavia no comienza.',
                         ];
                     }
 
@@ -240,19 +335,21 @@ class TicketReservationController extends Controller
                         ];
                     }
 
-                    $expiresAt = $now->modify(
-                        '+' . self::RESERVATION_MINUTES . ' minutes'
-                    );
-
                     $price = $ticket['price'] ?? null;
 
                     if (!is_int($price) || $price < 0) {
                         throw new RuntimeException(
-                            'El precio del boleto no es válido.'
+                            'El precio del boleto no es valido.'
                         );
                     }
 
-                    // Registrar la reserva con su vencimiento.
+                    $expiresAt = $now->modify(
+                        '+' . self::RESERVATION_MINUTES . ' minutes'
+                    );
+
+                    $timestamp = new Timestamp($now);
+
+                    // Guardar la reserva temporal.
                     $reservation = [
                         'eventId' => $eventId,
                         'ticketTypeId' => $ticketTypeId,
@@ -261,27 +358,31 @@ class TicketReservationController extends Controller
                         'unitPrice' => $price,
                         'currency' => 'MXN',
                         'status' => 'active',
-                        'createdAt' => new Timestamp($now),
-                        'updatedAt' => new Timestamp($now),
+                        'createdAt' => $timestamp,
+                        'updatedAt' => $timestamp,
                         'expiresAt' => new Timestamp($expiresAt),
                     ];
 
-                    // Ambas escrituras pertenecen a la misma transacción.
+                    // La reserva y el inventario se actualizan
+                    // en una sola transaccion.
                     $transaction->create(
                         $reservationDocument,
                         $reservation
                     );
 
-                    $transaction->update($ticketDocument, [
+                    $transaction->update(
+                        $ticketDocument,
                         [
-                            'path' => 'reserved',
-                            'value' => $reserved + $quantity,
-                        ],
-                        [
-                            'path' => 'updatedAt',
-                            'value' => new Timestamp($now),
-                        ],
-                    ]);
+                            [
+                                'path' => 'reserved',
+                                'value' => $reserved + $quantity,
+                            ],
+                            [
+                                'path' => 'updatedAt',
+                                'value' => $timestamp,
+                            ],
+                        ]
+                    );
 
                     return [
                         'code' => 201,
@@ -316,10 +417,13 @@ class TicketReservationController extends Controller
                 $result,
                 $statusCode
             );
-        } catch (Throwable $e) {
-            Log::error('Error al crear reserva temporal BluePass', [
-                'exception' => get_class($e),
-            ]);
+        } catch (Throwable $exception) {
+            Log::error(
+                'Error al crear reserva temporal BluePass',
+                [
+                    'exception' => get_class($exception),
+                ]
+            );
 
             return response()->json([
                 'message' => 'No fue posible crear la reserva.',

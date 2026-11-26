@@ -3,9 +3,11 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\MultiOrderReservationValidator;
 use App\Services\OrderAmountCalculator;
 use App\Services\OrderReservationValidator;
 use App\Services\OrderSelectionValidator;
+use App\Services\ReservationItems;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Exception\AbortedException;
@@ -16,6 +18,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 
@@ -25,6 +28,8 @@ class OrderController extends Controller
 
     /**
      * Crear un pedido a partir de una reserva vigente.
+     *
+     * Acepta compras tradicionales y multiples.
      */
     public function store(
         Request $request,
@@ -50,13 +55,20 @@ class OrderController extends Controller
             ], 403);
         }
 
-        if (!preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $eventId)) {
+        if (
+            !preg_match(
+                '/^[A-Za-z0-9_-]{1,128}$/D',
+                $eventId
+            )
+        ) {
             return response()->json([
                 'message' => 'El evento no existe.',
             ], 404);
         }
 
-        $idempotencyKey = $request->header('Idempotency-Key');
+        $idempotencyKey = $request->header(
+            'Idempotency-Key'
+        );
 
         if (
             !is_string($idempotencyKey) ||
@@ -87,8 +99,20 @@ class OrderController extends Controller
         }
 
         $reservationId = $selection['reservationId'];
-        $ticketTypeId = $selection['ticketTypeId'];
-        $quantity = $selection['quantity'];
+
+        $isMultiple = array_key_exists(
+            'items',
+            $selection
+        );
+
+        $selectedItems = $isMultiple
+            ? $selection['items']
+            : [
+                [
+                    'ticketTypeId' => $selection['ticketTypeId'],
+                    'quantity' => $selection['quantity'],
+                ],
+            ];
 
         $orderId = hash(
             'sha256',
@@ -100,10 +124,6 @@ class OrderController extends Controller
                 ->collection('events')
                 ->document($eventId);
 
-            $ticketDocument = $eventDocument
-                ->collection('ticketTypes')
-                ->document($ticketTypeId);
-
             $reservationDocument = $eventDocument
                 ->collection('reservations')
                 ->document($reservationId);
@@ -111,6 +131,17 @@ class OrderController extends Controller
             $orderDocument = $firestore
                 ->collection('orders')
                 ->document($orderId);
+
+            // Preparar las categorias seleccionadas.
+            $ticketDocuments = [];
+
+            foreach ($selectedItems as $item) {
+                $typeId = $item['ticketTypeId'];
+
+                $ticketDocuments[$typeId] = $eventDocument
+                    ->collection('ticketTypes')
+                    ->document($typeId);
+            }
 
             $result = null;
 
@@ -123,22 +154,23 @@ class OrderController extends Controller
                     $result = $firestore->runTransaction(
                         function (Transaction $transaction) use (
                             $eventDocument,
-                            $ticketDocument,
                             $reservationDocument,
                             $orderDocument,
+                            $ticketDocuments,
                             $reservationValidator,
                             $amountCalculator,
                             $eventId,
                             $reservationId,
-                            $ticketTypeId,
-                            $quantity,
                             $selection,
+                            $selectedItems,
+                            $isMultiple,
                             $uid,
                             $profile,
                             $orderId,
                             $idempotencyKey
                         ): array {
-                            // Leer antes de realizar cualquier escritura.
+                            // Leer todos los documentos antes
+                            // de realizar cualquier escritura.
                             $orderSnapshot = $transaction->snapshot(
                                 $orderDocument
                             );
@@ -147,15 +179,20 @@ class OrderController extends Controller
                                 $eventDocument
                             );
 
-                            $ticketSnapshot = $transaction->snapshot(
-                                $ticketDocument
-                            );
-
                             $reservationSnapshot = $transaction->snapshot(
                                 $reservationDocument
                             );
 
-                            // Reutilizar el pedido si la clave ya existe.
+                            $ticketSnapshots = [];
+
+                            foreach (
+                                $ticketDocuments as $typeId => $document
+                            ) {
+                                $ticketSnapshots[$typeId] =
+                                    $transaction->snapshot($document);
+                            }
+
+                            // Comprobar si el pedido ya existe.
                             if ($orderSnapshot->exists()) {
                                 $existingOrder = $orderSnapshot->data();
 
@@ -164,11 +201,14 @@ class OrderController extends Controller
                                     ($existingOrder['userId'] ?? null) !== $uid ||
                                     ($existingOrder['eventId'] ?? null) !== $eventId ||
                                     ($existingOrder['reservationId'] ?? null) !== $reservationId ||
-                                    ($existingOrder['ticketTypeId'] ?? null) !== $ticketTypeId ||
-                                    ($existingOrder['quantity'] ?? null) !== $quantity ||
                                     (
                                         isset($existingOrder['idempotencyKey']) &&
                                         $existingOrder['idempotencyKey'] !== $idempotencyKey
+                                    ) ||
+                                    !$this->orderMatchesSelection(
+                                        $existingOrder,
+                                        $selectedItems,
+                                        $isMultiple
                                     )
                                 ) {
                                     return [
@@ -193,7 +233,8 @@ class OrderController extends Controller
                                     ];
                                 }
 
-                                $existingReservation = $reservationSnapshot->data();
+                                $existingReservation =
+                                    $reservationSnapshot->data();
 
                                 if (!is_array($existingReservation)) {
                                     return [
@@ -202,12 +243,15 @@ class OrderController extends Controller
                                     ];
                                 }
 
-                                $existingValidation = $reservationValidator->validate(
-                                    $selection,
-                                    $existingReservation,
-                                    $uid,
-                                    $eventId
-                                );
+                                $existingValidation =
+                                    $this->validateReservation(
+                                        $selection,
+                                        $existingReservation,
+                                        $uid,
+                                        $eventId,
+                                        $reservationValidator,
+                                        $isMultiple
+                                    );
 
                                 if (!$existingValidation['valid']) {
                                     return [
@@ -236,6 +280,7 @@ class OrderController extends Controller
                                 ];
                             }
 
+                            // Comprobar que el evento exista.
                             if (!$eventSnapshot->exists()) {
                                 return [
                                     'code' => 404,
@@ -255,7 +300,7 @@ class OrderController extends Controller
                                 ];
                             }
 
-                            // El vendedor es obligatorio y viene del evento.
+                            // Obtener el vendedor del evento.
                             $sellerId = $event['sellerId'] ?? null;
 
                             if (
@@ -271,25 +316,37 @@ class OrderController extends Controller
                                 ];
                             }
 
-                            if (!$ticketSnapshot->exists()) {
-                                return [
-                                    'code' => 404,
-                                    'message' => 'El tipo de boleto no existe.',
-                                ];
+                            // Comprobar todos los tipos de boleto.
+                            $inventories = [];
+
+                            foreach ($selectedItems as $item) {
+                                $typeId = $item['ticketTypeId'];
+
+                                $snapshot = $ticketSnapshots[$typeId];
+
+                                if (!$snapshot->exists()) {
+                                    return [
+                                        'code' => 404,
+                                        'message' => 'El tipo de boleto no existe.',
+                                    ];
+                                }
+
+                                $ticket = $snapshot->data();
+
+                                if (
+                                    !is_array($ticket) ||
+                                    ($ticket['status'] ?? null) !== 'active'
+                                ) {
+                                    return [
+                                        'code' => 409,
+                                        'message' => 'El tipo de boleto no esta disponible.',
+                                    ];
+                                }
+
+                                $inventories[$typeId] = $ticket;
                             }
 
-                            $ticket = $ticketSnapshot->data();
-
-                            if (
-                                !is_array($ticket) ||
-                                ($ticket['status'] ?? null) !== 'active'
-                            ) {
-                                return [
-                                    'code' => 409,
-                                    'message' => 'El tipo de boleto no esta disponible.',
-                                ];
-                            }
-
+                            // Comprobar la reserva.
                             if (!$reservationSnapshot->exists()) {
                                 return [
                                     'code' => 404,
@@ -306,11 +363,15 @@ class OrderController extends Controller
                                 ];
                             }
 
-                            $validation = $reservationValidator->validate(
+                            // Comprobar comprador, evento,
+                            // cantidades y vencimiento.
+                            $validation = $this->validateReservation(
                                 $selection,
                                 $reservation,
                                 $uid,
-                                $eventId
+                                $eventId,
+                                $reservationValidator,
+                                $isMultiple
                             );
 
                             if (!$validation['valid']) {
@@ -320,6 +381,8 @@ class OrderController extends Controller
                                 ];
                             }
 
+                            // No permitir dos pedidos
+                            // asociados a la misma reserva.
                             if (
                                 array_key_exists('orderId', $reservation) &&
                                 $reservation['orderId'] !== null
@@ -330,38 +393,72 @@ class OrderController extends Controller
                                 ];
                             }
 
-                            $capacity = $ticket['capacity'] ?? null;
-                            $sold = $ticket['sold'] ?? null;
-                            $reserved = $ticket['reserved'] ?? null;
+                            // Comprobar el inventario reservado
+                            // de cada categoria.
+                            foreach ($selectedItems as $item) {
+                                $typeId = $item['ticketTypeId'];
+                                $quantity = $item['quantity'];
 
-                            if (
-                                !is_int($capacity) ||
-                                !is_int($sold) ||
-                                !is_int($reserved) ||
-                                $capacity < 1 ||
-                                $sold < 0 ||
-                                $reserved < 0 ||
-                                $sold > $capacity ||
-                                $reserved > $capacity - $sold
-                            ) {
-                                throw new RuntimeException(
-                                    'El inventario de boletos es inconsistente.'
-                                );
+                                $ticket = $inventories[$typeId];
+
+                                $capacity = $ticket['capacity'] ?? null;
+                                $sold = $ticket['sold'] ?? null;
+                                $reserved = $ticket['reserved'] ?? null;
+
+                                if (
+                                    !is_int($capacity) ||
+                                    !is_int($sold) ||
+                                    !is_int($reserved) ||
+                                    $capacity < 1 ||
+                                    $sold < 0 ||
+                                    $reserved < 0 ||
+                                    $sold > $capacity ||
+                                    $reserved > $capacity - $sold
+                                ) {
+                                    throw new RuntimeException(
+                                        'El inventario de boletos es inconsistente.'
+                                    );
+                                }
+
+                                if ($reserved < $quantity) {
+                                    return [
+                                        'code' => 409,
+                                        'message' => 'El inventario reservado es insuficiente.',
+                                    ];
+                                }
                             }
 
-                            if ($reserved < $quantity) {
-                                return [
-                                    'code' => 409,
-                                    'message' => 'El inventario reservado es insuficiente.',
+                            // Calcular los importes desde
+                            // los datos validados del servidor.
+                            if ($isMultiple) {
+                                $amounts =
+                                    $amountCalculator->calculateItems(
+                                        $validation['items']
+                                    );
+
+                                $items = $amounts['items'];
+                                $quantity = $amounts['quantity'];
+                            } else {
+                                $amounts = $amountCalculator->calculate(
+                                    $validation['quantity'],
+                                    $validation['unitPrice'],
+                                    $validation['currency']
+                                );
+
+                                $quantity = $amounts['quantity'];
+
+                                $items = [
+                                    [
+                                        'ticketTypeId' =>
+                                            $selection['ticketTypeId'],
+                                        'quantity' => $quantity,
+                                        'unitPrice' =>
+                                            $amounts['unitPrice'],
+                                        'subtotal' =>
+                                            $amounts['subtotal'],
+                                    ],
                                 ];
                             }
-
-                            // Los importes se calculan en el servidor.
-                            $amounts = $amountCalculator->calculate(
-                                $validation['quantity'],
-                                $validation['unitPrice'],
-                                $validation['currency']
-                            );
 
                             $now = new DateTimeImmutable();
                             $timestamp = new Timestamp($now);
@@ -374,15 +471,6 @@ class OrderController extends Controller
                                 ? ($profile['email'] ?? '')
                                 : '';
 
-                            $items = [
-                                [
-                                    'ticketTypeId' => $ticketTypeId,
-                                    'quantity' => $quantity,
-                                    'unitPrice' => $amounts['unitPrice'],
-                                    'subtotal' => $amounts['subtotal'],
-                                ],
-                            ];
-
                             $order = [
                                 'userId' => $uid,
                                 'eventId' => $eventId,
@@ -391,9 +479,7 @@ class OrderController extends Controller
                                 'items' => $items,
                                 'idempotencyKey' => $idempotencyKey,
                                 'reservationId' => $reservationId,
-                                'ticketTypeId' => $ticketTypeId,
                                 'quantity' => $quantity,
-                                'unitPrice' => $amounts['unitPrice'],
                                 'currency' => $amounts['currency'],
                                 'subtotal' => $amounts['subtotal'],
                                 'fees' => $amounts['fees'],
@@ -415,7 +501,19 @@ class OrderController extends Controller
                                 'updatedAt' => $timestamp,
                             ];
 
-                            // Ambas escrituras pertenecen a la misma transaccion.
+                            // Mantener los campos originales
+                            // de pedidos tradicionales.
+                            if (!$isMultiple) {
+                                $order['ticketTypeId'] =
+                                    $selection['ticketTypeId'];
+
+                                $order['unitPrice'] =
+                                    $amounts['unitPrice'];
+                            }
+
+                            // Crear un solo pedido y vincular
+                            // su reserva de manera atomica.
+                            // No reservar inventario otra vez.
                             $transaction->create(
                                 $orderDocument,
                                 $order
@@ -447,10 +545,11 @@ class OrderController extends Controller
                         }
                     );
 
-                    // La transaccion termino correctamente.
                     break;
                 } catch (AbortedException $exception) {
-                    if ($attempt === self::MAX_TRANSACTION_ATTEMPTS) {
+                    if (
+                        $attempt === self::MAX_TRANSACTION_ATTEMPTS
+                    ) {
                         Log::warning(
                             'Conflicto de concurrencia al crear pedido BluePass',
                             [
@@ -464,8 +563,8 @@ class OrderController extends Controller
                         ], 503)->header('Retry-After', '1');
                     }
 
-                    // Espera breve y variable antes de una transaccion nueva.
-                    // El siguiente intento volvera a leer pedido y reserva.
+                    // Reintentar una transaccion
+                    // cuando Firestore detecta conflicto.
                     usleep(
                         (100000 * $attempt) +
                         random_int(0, 100000)
@@ -499,7 +598,74 @@ class OrderController extends Controller
     }
 
     /**
-     * Preparar el resumen del pedido para el comprador.
+     * Validar una reserva tradicional o multiple.
+     */
+    private function validateReservation(
+        array $selection,
+        array $reservation,
+        string $userId,
+        string $eventId,
+        OrderReservationValidator $reservationValidator,
+        bool $isMultiple
+    ): array {
+        if ($isMultiple) {
+            return (new MultiOrderReservationValidator())
+                ->validate(
+                    $selection,
+                    $reservation,
+                    $userId,
+                    $eventId
+                );
+        }
+
+        return $reservationValidator->validate(
+            $selection,
+            $reservation,
+            $userId,
+            $eventId
+        );
+    }
+
+    /**
+     * Comprobar que la misma clave de idempotencia
+     * corresponda a la misma seleccion.
+     */
+    private function orderMatchesSelection(
+        array $order,
+        array $selectedItems,
+        bool $isMultiple
+    ): bool {
+        if (!$isMultiple) {
+            return (
+                isset($order['ticketTypeId']) &&
+                $order['ticketTypeId'] ===
+                    $selectedItems[0]['ticketTypeId'] &&
+                ($order['quantity'] ?? null) ===
+                    $selectedItems[0]['quantity']
+            );
+        }
+
+        // No confundir pedidos tradicionales
+        // con pedidos de formato multiple.
+        if (
+            array_key_exists('ticketTypeId', $order) ||
+            !array_key_exists('items', $order)
+        ) {
+            return false;
+        }
+
+        try {
+            $orderItems = (new ReservationItems())
+                ->fromReservation($order);
+
+            return $orderItems === $selectedItems;
+        } catch (InvalidArgumentException $exception) {
+            return false;
+        }
+    }
+
+    /**
+     * Preparar el resumen del pedido.
      */
     private function formatOrder(
         string $orderId,
@@ -527,9 +693,10 @@ class OrderController extends Controller
             'total' => $order['total'] ?? null,
             'status' => $order['status'] ?? null,
             'buyer' => $order['buyer'] ?? null,
-            'expiresAt' => $expiresAt instanceof DateTimeInterface
-                ? $expiresAt->format(DateTimeInterface::ATOM)
-                : null,
+            'expiresAt' =>
+                $expiresAt instanceof DateTimeInterface
+                    ? $expiresAt->format(DateTimeInterface::ATOM)
+                    : null,
         ];
     }
 }

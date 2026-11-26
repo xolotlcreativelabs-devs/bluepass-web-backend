@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Services\ReservationItems;
 use DateTimeImmutable;
 use DateTimeInterface;
 use Google\Cloud\Core\Timestamp;
@@ -17,7 +18,8 @@ class ExpireTicketReservations extends Command
 {
     protected $signature = 'reservations:expire';
 
-    protected $description = 'Liberar boletos de reservas temporales vencidas';
+    protected $description =
+        'Liberar boletos de reservas temporales vencidas';
 
     private const BATCH_SIZE = 100;
 
@@ -100,7 +102,7 @@ class ExpireTicketReservations extends Command
     }
 
     /**
-     * Liberar una reserva y vencer su pedido asociado.
+     * Liberar todos los tipos de una reserva vencida.
      */
     private function releaseReservation(
         FirestoreClient $firestore,
@@ -111,7 +113,7 @@ class ExpireTicketReservations extends Command
                 $firestore,
                 $reservationDocument
             ): string {
-                // Consultar la reserva dentro de la transaccion.
+                // Leer la reserva dentro de la transaccion.
                 $reservationSnapshot = $transaction->snapshot(
                     $reservationDocument
                 );
@@ -128,7 +130,7 @@ class ExpireTicketReservations extends Command
                     );
                 }
 
-                // No procesar reservas ya cerradas.
+                // No liberar inventario de reservas cerradas.
                 if (($reservation['status'] ?? null) !== 'active') {
                     return 'skipped';
                 }
@@ -145,73 +147,93 @@ class ExpireTicketReservations extends Command
                     );
                 }
 
-                // Revisar el vencimiento nuevamente.
+                // Volver a comprobar el vencimiento.
                 if ($now < $expiresAt) {
                     return 'skipped';
                 }
 
                 $eventId = $reservation['eventId'] ?? null;
-                $ticketTypeId = $reservation['ticketTypeId'] ?? null;
-                $quantity = $reservation['quantity'] ?? null;
                 $userId = $reservation['userId'] ?? null;
                 $orderId = $reservation['orderId'] ?? null;
 
-                if (
-                    !$this->validId($eventId) ||
-                    !$this->validId($ticketTypeId) ||
-                    !is_int($quantity) ||
-                    $quantity < 1
-                ) {
+                if (!$this->validId($eventId)) {
                     throw new RuntimeException(
-                        'La reserva contiene datos de inventario invalidos.'
+                        'El evento de la reserva es invalido.'
                     );
                 }
 
-                $ticketDocument = $firestore
-                    ->collection('events')
-                    ->document($eventId)
-                    ->collection('ticketTypes')
-                    ->document($ticketTypeId);
+                // Aceptar reservas tradicionales y multiples.
+                $items = (new ReservationItems())
+                    ->fromReservation($reservation);
 
-                // Leer el inventario antes de escribir.
-                $ticketSnapshot = $transaction->snapshot(
-                    $ticketDocument
+                $isMultiple = array_key_exists(
+                    'items',
+                    $reservation
                 );
 
-                if (!$ticketSnapshot->exists()) {
-                    throw new RuntimeException(
-                        'No existe el inventario de la reserva.'
-                    );
+                $eventDocument = $firestore
+                    ->collection('events')
+                    ->document($eventId);
+
+                $ticketDocuments = [];
+
+                foreach ($items as $item) {
+                    $typeId = $item['ticketTypeId'];
+
+                    $ticketDocuments[$typeId] = $eventDocument
+                        ->collection('ticketTypes')
+                        ->document($typeId);
                 }
 
-                $ticket = $ticketSnapshot->data();
+                // Leer todos los inventarios antes de escribir.
+                $inventoryUpdates = [];
 
-                if (!is_array($ticket)) {
-                    throw new RuntimeException(
-                        'El inventario contiene datos invalidos.'
+                foreach ($items as $item) {
+                    $typeId = $item['ticketTypeId'];
+                    $quantity = $item['quantity'];
+
+                    $ticketSnapshot = $transaction->snapshot(
+                        $ticketDocuments[$typeId]
                     );
+
+                    if (!$ticketSnapshot->exists()) {
+                        throw new RuntimeException(
+                            'No existe el inventario de la reserva.'
+                        );
+                    }
+
+                    $ticket = $ticketSnapshot->data();
+
+                    if (!is_array($ticket)) {
+                        throw new RuntimeException(
+                            'El inventario contiene datos invalidos.'
+                        );
+                    }
+
+                    $capacity = $ticket['capacity'] ?? null;
+                    $sold = $ticket['sold'] ?? null;
+                    $reserved = $ticket['reserved'] ?? null;
+
+                    if (
+                        !is_int($capacity) ||
+                        !is_int($sold) ||
+                        !is_int($reserved) ||
+                        $capacity < 0 ||
+                        $sold < 0 ||
+                        $reserved < $quantity ||
+                        $sold > $capacity ||
+                        $reserved > ($capacity - $sold)
+                    ) {
+                        throw new RuntimeException(
+                            'El inventario es inconsistente.'
+                        );
+                    }
+
+                    $inventoryUpdates[$typeId] =
+                        $reserved - $quantity;
                 }
 
-                $capacity = $ticket['capacity'] ?? null;
-                $sold = $ticket['sold'] ?? null;
-                $reserved = $ticket['reserved'] ?? null;
-
-                if (
-                    !is_int($capacity) ||
-                    !is_int($sold) ||
-                    !is_int($reserved) ||
-                    $capacity < 0 ||
-                    $sold < 0 ||
-                    $reserved < $quantity ||
-                    $sold > $capacity ||
-                    $reserved > ($capacity - $sold)
-                ) {
-                    throw new RuntimeException(
-                        'El inventario es inconsistente.'
-                    );
-                }
-
-                // Comprobar si existe un pedido relacionado.
+                // Consultar y validar el pedido relacionado.
                 $orderDocument = null;
 
                 if ($orderId !== null) {
@@ -245,8 +267,6 @@ class ExpireTicketReservations extends Command
                         !is_array($order) ||
                         ($order['userId'] ?? null) !== $userId ||
                         ($order['eventId'] ?? null) !== $eventId ||
-                        ($order['ticketTypeId'] ?? null) !== $ticketTypeId ||
-                        ($order['quantity'] ?? null) !== $quantity ||
                         ($order['reservationId'] ?? null) !==
                             $reservationDocument->id()
                     ) {
@@ -255,8 +275,31 @@ class ExpireTicketReservations extends Command
                         );
                     }
 
-                    // No liberar boletos vinculados a pedidos pagados
-                    // o con un estado diferente de pendiente.
+                    if ($isMultiple) {
+                        // Comprobar categorias y cantidades del pedido.
+                        $orderItems = (new ReservationItems())
+                            ->fromReservation($order);
+
+                        if ($orderItems !== $items) {
+                            throw new RuntimeException(
+                                'Los boletos del pedido no coinciden.'
+                            );
+                        }
+                    } else {
+                        // Conservar las comprobaciones tradicionales.
+                        if (
+                            ($order['ticketTypeId'] ?? null) !==
+                                $items[0]['ticketTypeId'] ||
+                            ($order['quantity'] ?? null) !==
+                                $items[0]['quantity']
+                        ) {
+                            throw new RuntimeException(
+                                'El pedido no coincide con la reserva.'
+                            );
+                        }
+                    }
+
+                    // Nunca liberar boletos de pedidos pagados.
                     if (($order['status'] ?? null) !== 'pending') {
                         throw new RuntimeException(
                             'El pedido asociado no esta pendiente.'
@@ -266,17 +309,23 @@ class ExpireTicketReservations extends Command
 
                 $timestamp = new Timestamp($now);
 
-                // Actualizar el inventario una sola vez.
-                $transaction->update($ticketDocument, [
-                    [
-                        'path' => 'reserved',
-                        'value' => $reserved - $quantity,
-                    ],
-                    [
-                        'path' => 'updatedAt',
-                        'value' => $timestamp,
-                    ],
-                ]);
+                // Las escrituras se realizan solo despues
+                // de comprobar todas las categorias.
+                foreach ($inventoryUpdates as $typeId => $reserved) {
+                    $transaction->update(
+                        $ticketDocuments[$typeId],
+                        [
+                            [
+                                'path' => 'reserved',
+                                'value' => $reserved,
+                            ],
+                            [
+                                'path' => 'updatedAt',
+                                'value' => $timestamp,
+                            ],
+                        ]
+                    );
+                }
 
                 // Marcar la reserva como vencida.
                 $transaction->update($reservationDocument, [
@@ -290,7 +339,7 @@ class ExpireTicketReservations extends Command
                     ],
                 ]);
 
-                // Vencer tambien el pedido dentro de la transaccion.
+                // Vencer tambien el pedido asociado.
                 if ($orderDocument !== null) {
                     $transaction->update($orderDocument, [
                         [
@@ -315,7 +364,10 @@ class ExpireTicketReservations extends Command
     private function validId(mixed $id): bool
     {
         return is_string($id) &&
-            preg_match('/^[A-Za-z0-9_-]{1,128}$/D', $id) === 1;
+            preg_match(
+                '/^[A-Za-z0-9_-]{1,128}$/D',
+                $id
+            ) === 1;
     }
 
     /**
