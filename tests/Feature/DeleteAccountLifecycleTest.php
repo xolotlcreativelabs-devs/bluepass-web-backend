@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Http\Controllers\Api\DeleteAccountController;
 use Google\Cloud\Firestore\FirestoreClient;
 use Illuminate\Http\Request;
+use Kreait\Firebase\Auth\UserRecord;
 use Kreait\Firebase\Contract\Auth;
 use Lcobucci\JWT\Token\DataSet;
 use Lcobucci\JWT\UnencryptedToken;
@@ -49,7 +50,7 @@ class DeleteAccountLifecycleTest extends TestCase
 
             $auth = $this->mockAuthentication($uid);
 
-            // Simular la eliminación de Firebase Authentication.
+            // Simular la eliminacion de Firebase Authentication.
             $auth->shouldReceive('deleteUser')
                 ->once()
                 ->with($uid);
@@ -96,6 +97,16 @@ class DeleteAccountLifecycleTest extends TestCase
                     new RuntimeException('Fallo simulado de Firebase Auth')
                 );
 
+            // No es posible confirmar si la identidad sigue existiendo.
+            $auth->shouldReceive('getUser')
+                ->once()
+                ->with($uid)
+                ->andThrow(
+                    new RuntimeException(
+                        'No se pudo consultar Firebase Authentication'
+                    )
+                );
+
             $response = $this->executeDeletion($uid, $auth);
 
             $this->assertSame(500, $response->getStatusCode());
@@ -104,10 +115,67 @@ class DeleteAccountLifecycleTest extends TestCase
 
             $this->assertTrue($snapshot->exists());
 
-            // Un resultado incierto de Firebase debe mantener
-            // bloqueada la cuenta hasta su revision.
+            // Ante un resultado incierto, mantener la cuenta bloqueada.
             $this->assertSame(
                 'deletion_pending',
+                $snapshot->data()['status'] ?? null
+            );
+        } finally {
+            $userDocument->delete();
+        }
+    }
+
+    public function test_restores_account_when_authentication_deletion_fails_but_identity_exists(): void
+    {
+        $uid = $this->newTestUid();
+
+        $userDocument = $this->firestore
+            ->collection('users')
+            ->document($uid);
+
+        try {
+            $userDocument->set($this->userData($uid));
+
+            $auth = $this->mockAuthentication($uid);
+
+            // Simular un error al eliminar la identidad.
+            $auth->shouldReceive('deleteUser')
+                ->once()
+                ->with($uid)
+                ->andThrow(
+                    new RuntimeException(
+                        'Fallo simulado al eliminar identidad'
+                    )
+                );
+
+            // Crear un registro real de Firebase, pero con datos ficticios.
+            $firebaseUser = UserRecord::fromResponseData([
+                'localId' => $uid,
+                'email' => $uid . '@example.test',
+                'emailVerified' => true,
+                'disabled' => false,
+                'createdAt' => (string) (time() * 1000),
+            ]);
+
+            // Simular que Firebase confirma que la identidad existe.
+            $auth->shouldReceive('getUser')
+                ->once()
+                ->with($uid)
+                ->andReturn($firebaseUser);
+
+            $response = $this->executeDeletion($uid, $auth);
+
+            // La eliminacion fallo y debe responder con error.
+            $this->assertSame(500, $response->getStatusCode());
+
+            $snapshot = $userDocument->snapshot();
+
+            // El perfil debe seguir existiendo.
+            $this->assertTrue($snapshot->exists());
+
+            // La identidad sigue existiendo y el perfil debe recuperarse.
+            $this->assertSame(
+                'active',
                 $snapshot->data()['status'] ?? null
             );
         } finally {

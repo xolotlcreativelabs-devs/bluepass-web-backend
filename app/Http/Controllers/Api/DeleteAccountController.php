@@ -23,7 +23,11 @@ class DeleteAccountController extends Controller
         $uid = $request->attributes->get('firebase_uid');
         $profile = $request->attributes->get('firebase_profile');
 
-        if (!is_string($uid) || $uid === '' || !is_array($profile)) {
+        if (
+            !is_string($uid) ||
+            $uid === '' ||
+            !is_array($profile)
+        ) {
             return response()->json([
                 'message' => 'No fue posible verificar la identidad.',
             ], 401);
@@ -89,7 +93,7 @@ class DeleteAccountController extends Controller
                 ->collection('users')
                 ->document($uid);
 
-            // Bloquear la cuenta antes de iniciar la eliminacion.
+            // Bloquear la cuenta mientras se prepara la eliminacion.
             $result = $firestore->runTransaction(
                 function (Transaction $transaction) use (
                     $userDocument,
@@ -142,9 +146,17 @@ class DeleteAccountController extends Controller
 
             $locked = true;
 
-            // Comprobar registros relacionados con la cuenta.
-            if ($this->hasRelatedRecords($firestore, $userDocument, $uid)) {
-                if (!$this->restoreUser($firestore, $userDocument, $uid)) {
+            // Comprobar si existen registros asociados a la cuenta.
+            if ($this->hasRelatedRecords(
+                $firestore,
+                $userDocument,
+                $uid
+            )) {
+                if (!$this->restoreUser(
+                    $firestore,
+                    $userDocument,
+                    $uid
+                )) {
                     return response()->json([
                         'message' => 'La cuenta requiere una revision antes de continuar.',
                     ], 500);
@@ -158,15 +170,15 @@ class DeleteAccountController extends Controller
                 ], 409);
             }
 
-            // Desde este punto, el resultado de Firebase puede ser incierto.
-            // No restaurar automaticamente la cuenta si ocurre un error.
+            // A partir de aqui, Firebase puede haber eliminado
+            // la identidad incluso si devuelve un error.
             $authDeletionStarted = true;
 
-            // Eliminar la identidad de Firebase Authentication.
             $auth->deleteUser($uid);
             $authDeleted = true;
 
-            // Eliminar el perfil solo si Firebase confirmo la eliminacion.
+            // Eliminar el perfil solo despues de confirmar
+            // que Firebase Authentication elimino la identidad.
             $userDocument->delete();
 
             $locked = false;
@@ -182,8 +194,8 @@ class DeleteAccountController extends Controller
                 'authDeleted' => $authDeleted,
             ]);
 
-            // Restaurar solo cuando no se intento eliminar
-            // la identidad en Firebase Authentication.
+            // Si todavia no se intento eliminar la identidad,
+            // restaurar el estado anterior.
             if (
                 $locked &&
                 !$authDeletionStarted &&
@@ -203,8 +215,32 @@ class DeleteAccountController extends Controller
                 }
             }
 
-            // Si Firebase pudo eliminar la identidad, mantener
-            // el perfil bloqueado para una revision segura.
+            // Si la eliminacion de Authentication fallo,
+            // comprobar si la identidad sigue existiendo.
+            if (
+                $authDeletionStarted &&
+                !$authDeleted &&
+                $locked &&
+                $userDocument !== null
+            ) {
+                $restored = $this->restoreAfterAuthFailure(
+                    $auth,
+                    $firestore,
+                    $userDocument,
+                    $uid
+                );
+
+                if ($restored) {
+                    return response()->json([
+                        'message' => 'No fue posible eliminar la cuenta. El perfil fue restaurado y puedes continuar utilizando BluePass.',
+                        'code' => 'ACCOUNT_DELETION_FAILED_RESTORED',
+                    ], 500);
+                }
+            }
+
+            // Si no se pudo confirmar el estado de la identidad
+            // o la eliminacion ya se habia completado,
+            // mantener el perfil pendiente de revision.
             if ($authDeletionStarted) {
                 Log::warning(
                     'Eliminacion de cuenta pendiente de verificacion',
@@ -250,6 +286,7 @@ class DeleteAccountController extends Controller
             }
         }
 
+        // Comprobar reservas guardadas dentro de eventos.
         $reservations = $firestore
             ->collectionGroup('reservations')
             ->where('userId', '=', $uid)
@@ -260,6 +297,7 @@ class DeleteAccountController extends Controller
             return true;
         }
 
+        // Comprobar favoritos del comprador.
         $favorites = $userDocument
             ->collection('favorites')
             ->limit(1)
@@ -277,6 +315,61 @@ class DeleteAccountController extends Controller
         }
 
         return false;
+    }
+
+    private function restoreAfterAuthFailure(
+        Auth $auth,
+        FirestoreClient $firestore,
+        DocumentReference $userDocument,
+        string $uid
+    ): bool {
+        try {
+            // Consultar nuevamente Firebase Authentication.
+            $firebaseUser = $auth->getUser($uid);
+
+            // Verificar que sea la identidad esperada
+            // y que no se encuentre deshabilitada.
+            if (
+                $firebaseUser->uid !== $uid ||
+                $firebaseUser->disabled
+            ) {
+                Log::warning(
+                    'La identidad no cumple las condiciones de restauracion',
+                    ['uid' => $uid]
+                );
+
+                return false;
+            }
+
+            // Recuperar el perfil solamente si sigue bloqueado
+            // y pertenece al mismo usuario.
+            $restored = $this->restoreUser(
+                $firestore,
+                $userDocument,
+                $uid
+            );
+
+            if ($restored) {
+                Log::info(
+                    'Cuenta restaurada despues de un error de Firebase Authentication',
+                    ['uid' => $uid]
+                );
+            }
+
+            return $restored;
+        } catch (Throwable $exception) {
+            // No restaurar si no se puede comprobar
+            // el estado de Firebase Authentication.
+            Log::warning(
+                'No fue posible verificar la identidad despues del error de eliminacion',
+                [
+                    'uid' => $uid,
+                    'exception' => get_class($exception),
+                ]
+            );
+
+            return false;
+        }
     }
 
     private function restoreUser(
@@ -301,6 +394,7 @@ class DeleteAccountController extends Controller
                     if (
                         !is_array($data) ||
                         ($data['authSubject'] ?? null) !== $uid ||
+                        ($data['role'] ?? null) !== 'customer' ||
                         ($data['status'] ?? null) !== 'deletion_pending'
                     ) {
                         return false;
