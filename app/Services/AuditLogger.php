@@ -10,7 +10,7 @@ use Throwable;
 class AuditLogger
 {
     /**
-     * Preparar los datos de un registro de auditoría.
+     * Preparar los datos de un registro de auditoria.
      */
     public function prepare(
         string $action,
@@ -21,7 +21,11 @@ class AuditLogger
         array $changedFields = []
     ): ?array {
         // Solo aceptar recursos conocidos.
-        if (!in_array($resourceType, ['events', 'news'], true)) {
+        if (!in_array($resourceType, [
+            'events',
+            'news',
+            'reviews',
+        ], true)) {
             return null;
         }
 
@@ -31,9 +35,21 @@ class AuditLogger
             'updated',
             'published',
             'unpublished',
+            'hidden',
         ];
 
         if (!in_array($action, $allowedActions, true)) {
+            return null;
+        }
+
+        // Ocultar resenas es exclusivo del administrador.
+        if (
+            $resourceType === 'reviews' &&
+            (
+                $actorRole !== 'admin' ||
+                $action !== 'hidden'
+            )
+        ) {
             return null;
         }
 
@@ -66,7 +82,7 @@ class AuditLogger
             'images',
         ];
 
-        // Registrar únicamente nombres de campos.
+        // Registrar unicamente los nombres de los campos.
         $safeFields = array_values(
             array_unique(
                 array_intersect(
@@ -88,10 +104,10 @@ class AuditLogger
     }
 
     /**
-     * Registrar una auditoría independiente.
+     * Registrar una auditoria independiente.
      *
-     * Este método no forma parte de una transacción
-     * que actualice eventos o noticias.
+     * Este metodo no forma parte de una transaccion
+     * que actualice eventos, noticias o resenas.
      */
     public function record(
         FirestoreClient $firestore,
@@ -125,7 +141,7 @@ class AuditLogger
             return true;
 
         } catch (Throwable $e) {
-            // No exponer información sensible.
+            // No exponer informacion sensible.
             Log::error('No fue posible registrar la auditoría', [
                 'action' => $action,
                 'resourceType' => $resourceType,

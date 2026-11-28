@@ -16,8 +16,12 @@ use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\OrderQueryController;
 use App\Http\Controllers\Api\OrderReceiptController;
 use App\Http\Controllers\Api\PasswordResetController;
+use App\Http\Controllers\Api\PastEventController;
 use App\Http\Controllers\Api\PurchaseNotificationController;
 use App\Http\Controllers\Api\RegisterCustomerController;
+use App\Http\Controllers\Api\ReviewController;
+use App\Http\Controllers\Api\ReviewModerationController;
+use App\Http\Controllers\Api\SellerReviewController;
 use App\Http\Controllers\Api\TicketPrintController;
 use App\Http\Controllers\Api\TicketQueryController;
 use App\Http\Controllers\Api\TicketReservationController;
@@ -63,7 +67,6 @@ Route::middleware([
         [UserProfileController::class, 'update']
     );
 
-    // Eliminar la cuenta del comprador autenticado.
     Route::delete(
         '/users/me',
         [DeleteAccountController::class, 'destroy']
@@ -85,11 +88,26 @@ Route::middleware([
     );
 });
 
-// Rutas publicas del catalogo de eventos.
+// Rutas publicas del catalogo y eventos pasados.
 Route::middleware('throttle:bluepass-api')->group(function () {
     Route::get(
         '/events',
         [EventCatalogController::class, 'index']
+    );
+
+    Route::get(
+        '/events/past',
+        [PastEventController::class, 'index']
+    );
+
+    Route::get(
+        '/events/past/{id}',
+        [PastEventController::class, 'show']
+    );
+
+    Route::get(
+        '/events/{id}/reviews',
+        [PastEventController::class, 'reviews']
     );
 
     Route::get(
@@ -159,6 +177,17 @@ Route::middleware([
     );
 });
 
+// Rutas exclusivas de vendedores.
+Route::middleware([
+    'throttle:bluepass-api',
+    'firebase.auth:seller',
+])->group(function () {
+    Route::get(
+        '/seller/events/{eventId}/reviews',
+        [SellerReviewController::class, 'index']
+    );
+});
+
 // Rutas protegidas de reservas, pedidos, boletos y comprobantes.
 Route::middleware([
     'throttle:bluepass-api',
@@ -214,13 +243,23 @@ Route::middleware([
         [TicketPrintController::class, 'show']
     );
 
-    // Consultar las notificaciones del comprador.
+    // Publicar una resena despues del evento.
+    Route::post(
+        '/events/{id}/reviews',
+        [ReviewController::class, 'store']
+    );
+
+    // Editar la resena del comprador autenticado.
+    Route::patch(
+        '/events/{id}/reviews/me',
+        [ReviewController::class, 'update']
+    );
+
     Route::get(
         '/users/me/notifications',
         [PurchaseNotificationController::class, 'index']
     );
 
-    // Marcar como leida una notificacion propia.
     Route::patch(
         '/users/me/notifications/{notificationId}/read',
         [PurchaseNotificationController::class, 'markRead']
@@ -240,21 +279,30 @@ Route::middleware('throttle:bluepass-api')->group(function () {
     );
 });
 
-// Rutas de noticias exclusivas del administrador.
+// Rutas exclusivas del administrador.
 Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth:admin',
 ])->group(function () {
+    // Ocultar una resena y registrar la auditoria.
+    Route::patch(
+        '/admin/events/{eventId}/reviews/{reviewId}/hide',
+        [ReviewModerationController::class, 'hide']
+    );
+
+    // Crear una noticia.
     Route::post(
         '/news',
         [NewsController::class, 'store']
     );
 
+    // Editar una noticia.
     Route::patch(
         '/news/{id}',
         [NewsController::class, 'update']
     );
 
+    // Publicar o despublicar una noticia.
     Route::patch(
         '/news/{id}/status',
         [NewsStatusController::class, 'update']
