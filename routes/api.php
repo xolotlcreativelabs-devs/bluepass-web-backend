@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\AdminSupportRequestController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DeleteAccountController;
 use App\Http\Controllers\Api\EventAvailabilityController;
@@ -10,6 +11,7 @@ use App\Http\Controllers\Api\EventStatusController;
 use App\Http\Controllers\Api\EventTicketManagementController;
 use App\Http\Controllers\Api\EventTicketTypeController;
 use App\Http\Controllers\Api\FavoriteController;
+use App\Http\Controllers\Api\HelpController;
 use App\Http\Controllers\Api\NewsController;
 use App\Http\Controllers\Api\NewsStatusController;
 use App\Http\Controllers\Api\OrderController;
@@ -22,6 +24,7 @@ use App\Http\Controllers\Api\RegisterCustomerController;
 use App\Http\Controllers\Api\ReviewController;
 use App\Http\Controllers\Api\ReviewModerationController;
 use App\Http\Controllers\Api\SellerReviewController;
+use App\Http\Controllers\Api\SupportRequestController;
 use App\Http\Controllers\Api\TicketPrintController;
 use App\Http\Controllers\Api\TicketQueryController;
 use App\Http\Controllers\Api\TicketReservationController;
@@ -188,7 +191,7 @@ Route::middleware([
     );
 });
 
-// Rutas protegidas de reservas, pedidos, boletos y comprobantes.
+// Rutas protegidas de compradores.
 Route::middleware([
     'throttle:bluepass-api',
     'firebase.auth:customer',
@@ -264,6 +267,12 @@ Route::middleware([
         '/users/me/notifications/{notificationId}/read',
         [PurchaseNotificationController::class, 'markRead']
     );
+
+    // Registrar una solicitud de soporte.
+    Route::post(
+        '/support/requests',
+        [SupportRequestController::class, 'store']
+    );
 });
 
 // Rutas publicas de noticias.
@@ -279,6 +288,14 @@ Route::middleware('throttle:bluepass-api')->group(function () {
     );
 });
 
+// Ruta publica del centro de ayuda.
+Route::middleware('throttle:bluepass-api')->group(function () {
+    Route::get(
+        '/help',
+        [HelpController::class, 'index']
+    );
+});
+
 // Rutas exclusivas del administrador.
 Route::middleware([
     'throttle:bluepass-api',
@@ -288,6 +305,18 @@ Route::middleware([
     Route::patch(
         '/admin/events/{eventId}/reviews/{reviewId}/hide',
         [ReviewModerationController::class, 'hide']
+    );
+
+    // Consultar las solicitudes de soporte.
+    Route::get(
+        '/admin/support/requests',
+        [AdminSupportRequestController::class, 'index']
+    );
+
+    // Consultar el detalle de una solicitud de soporte.
+    Route::get(
+        '/admin/support/requests/{id}',
+        [AdminSupportRequestController::class, 'show']
     );
 
     // Crear una noticia.
